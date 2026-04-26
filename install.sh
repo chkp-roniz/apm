@@ -3,8 +3,9 @@ set -e
 
 # APM CLI Installer Script
 # Usage: curl -sSL https://aka.ms/apm-unix | sh
-# Specific version:     curl -sSL https://aka.ms/apm-unix | sh -s -- @v1.2.3
+# Specific version:     curl -sSL https://aka.ms/apm-unix | sh -s -- @v1.2.3   (or VERSION=v1.2.3)
 # Custom install dir:   curl -sSL https://aka.ms/apm-unix | APM_INSTALL_DIR=$HOME/.local/bin sh
+# Custom repository:    APM_REPO=ghe-org/apm sh install.sh
 # GitHub Enterprise:    GITHUB_URL=https://gh.corp.com sh install.sh
 # For private repositories, use with authentication:
 #   curl -sSL -H "Authorization: token $GITHUB_APM_PAT" \
@@ -124,7 +125,7 @@ try_pip_installation() {
     
     # Try to install
     if $PIP_CMD install --user apm-cli; then
-        echo -e "${GREEN}[+]APM installed successfully via pip!${NC}"
+        echo -e "${GREEN}[+] APM installed successfully via pip!${NC}"
         
         # Check if apm is now available
         if command -v apm >/dev/null 2>&1; then
@@ -132,7 +133,7 @@ try_pip_installation() {
             echo -e "${BLUE}Version: $INSTALLED_VERSION${NC}"
             echo -e "${BLUE}Location: $(which apm)${NC}"
         else
-            echo -e "${YELLOW}[!]APM installed but not found in PATH${NC}"
+            echo -e "${YELLOW}[!] APM installed but not found in PATH${NC}"
             echo "You may need to add ~/.local/bin to your PATH:"
             echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
         fi
@@ -162,7 +163,7 @@ if [ "$PLATFORM" = "linux" ]; then
     if [ -n "$GLIBC_VERSION" ]; then
         # Compare versions
         if [ "$(printf '%s\n' "$REQUIRED_GLIBC" "$GLIBC_VERSION" | sort -V | head -n1)" != "$REQUIRED_GLIBC" ]; then
-            echo -e "${YELLOW}[!]Compatibility Issue Detected${NC}"
+            echo -e "${YELLOW}[!] Compatibility Issue Detected${NC}"
             echo -e "${YELLOW}Your glibc version: $GLIBC_VERSION${NC}"
             echo -e "${YELLOW}Required version: $REQUIRED_GLIBC or newer${NC}"
             echo ""
@@ -196,14 +197,15 @@ fi
 
 # Detect if running in a container and check compatibility
 if [ -f "/.dockerenv" ] || [ -f "/run/.containerenv" ] || grep -q "/docker/" /proc/1/cgroup 2>/dev/null; then
-    echo -e "${YELLOW}[!]Container/Dev Container environment detected${NC}"
+    echo -e "${YELLOW}[!] Container/Dev Container environment detected${NC}"
     echo -e "${YELLOW}Note: PyInstaller binaries may have compatibility issues in containers.${NC}"
     echo -e "${YELLOW}If installation fails, consider using: pip install --user apm-cli${NC}"
     echo ""
 fi
 
-# Check if we have permission to install to the configured directory
-if [ ! -w "$APM_INSTALL_DIR" ]; then
+# Check if we have permission to install to the configured directory.
+# Only warn if the dir already exists; mkdir -p later handles non-existent dirs.
+if [ -e "$APM_INSTALL_DIR" ] && [ ! -w "$APM_INSTALL_DIR" ]; then
     echo -e "${YELLOW}Note: Will need sudo permissions to install to $APM_INSTALL_DIR${NC}"
 fi
 
@@ -310,7 +312,7 @@ echo -e "${YELLOW}Downloading APM...${NC}"
 
 # Try downloading without authentication first (for public repos)
 if curl -L --fail --silent --show-error "$DOWNLOAD_URL" -o "$TMP_DIR/$DOWNLOAD_BINARY"; then
-    echo -e "${GREEN}[+]Download successful${NC}"
+    echo -e "${GREEN}[+] Download successful${NC}"
 else
     # If unauthenticated download fails, try with authentication if available
     if [ -n "$AUTH_HEADER_VALUE" ]; then
@@ -323,11 +325,11 @@ else
                 -H "Authorization: token $AUTH_HEADER_VALUE" \
                 -H "Accept: application/octet-stream" \
                 "$ASSET_URL" -o "$TMP_DIR/$DOWNLOAD_BINARY"; then
-                echo -e "${GREEN}[+]Download successful via GitHub API${NC}"
+                echo -e "${GREEN}[+] Download successful via GitHub API${NC}"
             else
                 echo -e "${BLUE}GitHub API download failed, trying direct URL with auth...${NC}"
                 if curl -L --fail --silent --show-error -H "Authorization: token $AUTH_HEADER_VALUE" "$DOWNLOAD_URL" -o "$TMP_DIR/$DOWNLOAD_BINARY"; then
-                    echo -e "${GREEN}[+]Download successful with authentication${NC}"
+                    echo -e "${GREEN}[+] Download successful with authentication${NC}"
                 else
                     echo -e "${RED}Error: Failed to download APM CLI even with authentication${NC}"
                     echo "Direct URL: $DOWNLOAD_URL"
@@ -348,7 +350,7 @@ else
         else
             echo -e "${BLUE}No API URL available, trying direct URL with auth...${NC}"
             if curl -L --fail --silent --show-error -H "Authorization: token $AUTH_HEADER_VALUE" "$DOWNLOAD_URL" -o "$TMP_DIR/$DOWNLOAD_BINARY"; then
-                echo -e "${GREEN}[+]Download successful with authentication${NC}"
+                echo -e "${GREEN}[+] Download successful with authentication${NC}"
             else
                 echo -e "${RED}Error: Failed to download APM CLI even with authentication${NC}"
                 echo "URL: $DOWNLOAD_URL"
@@ -390,7 +392,7 @@ fi
 # Extract binary from tar.gz
 echo -e "${YELLOW}Extracting binary...${NC}"
 if tar -xzf "$TMP_DIR/$DOWNLOAD_BINARY" -C "$TMP_DIR"; then
-    echo -e "${GREEN}[+]Extraction successful${NC}"
+    echo -e "${GREEN}[+] Extraction successful${NC}"
 else
     echo -e "${RED}Error: Failed to extract binary from archive${NC}"
     exit 1
@@ -411,7 +413,7 @@ else
 fi
 
 if [ $BINARY_TEST_EXIT_CODE -eq 0 ]; then
-    echo -e "${GREEN}[+]Binary test successful${NC}"
+    echo -e "${GREEN}[+] Binary test successful${NC}"
 else
     echo -e "${RED}Error: Downloaded binary failed to run${NC}"
     echo -e "${YELLOW}Exit code: $BINARY_TEST_EXIT_CODE${NC}"
@@ -421,7 +423,7 @@ else
     
     # Try to provide helpful context
     if echo "$BINARY_TEST_OUTPUT" | grep -q "GLIBC"; then
-        echo -e "${YELLOW}[!]glibc version incompatibility detected${NC}"
+        echo -e "${YELLOW}[!] glibc version incompatibility detected${NC}"
         if [ -n "$GLIBC_VERSION" ]; then
             echo "Your system has glibc $GLIBC_VERSION but the binary requires glibc 2.35+"
         fi
@@ -481,7 +483,7 @@ fi
 echo -e "${YELLOW}Installing APM CLI to $APM_INSTALL_DIR...${NC}"
 
 # APM installation directory (for the complete bundle)
-APM_LIB_DIR="$(dirname "$APM_INSTALL_DIR")/lib/apm"
+APM_LIB_DIR="${APM_LIB_DIR:-$(dirname "$APM_INSTALL_DIR")/lib/apm}"
 
 # Remove any existing installation
 if [ -d "$APM_LIB_DIR" ]; then
@@ -512,11 +514,11 @@ fi
 # Verify installation
 if command -v apm >/dev/null 2>&1; then
     INSTALLED_VERSION=$(apm --version 2>/dev/null || echo "unknown")
-    echo -e "${GREEN}[+]APM installed successfully!${NC}"
+    echo -e "${GREEN}[+] APM installed successfully!${NC}"
     echo -e "${BLUE}Version: $INSTALLED_VERSION${NC}"
     echo -e "${BLUE}Location: $APM_INSTALL_DIR/$BINARY_NAME -> $APM_LIB_DIR/$BINARY_NAME${NC}"
 else
-    echo -e "${YELLOW}[!]APM installed but not found in PATH${NC}"
+    echo -e "${YELLOW}[!] APM installed but not found in PATH${NC}"
     echo "You may need to add $APM_INSTALL_DIR to your PATH environment variable."
     echo "Add this line to your shell profile (.bashrc, .zshrc, etc.):"
     echo "  export PATH=\"$APM_INSTALL_DIR:\$PATH\""
