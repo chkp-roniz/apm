@@ -74,16 +74,34 @@ def _scrub_map(
     return out
 
 
+def _looks_like_path_token(text: str) -> bool:
+    if text.startswith(("/", "./", "../", "~")):
+        return True
+    if len(text) >= 3 and text[1] == ":" and text[0].isalpha():
+        return True
+    return "/" in text and "://" not in text
+
+
 def _scrub_url(url: str, server: str, result: ConvertResult) -> str:
     parts = urlsplit(url)
     if not parts.scheme or not parts.netloc:
         return url
-    netloc = parts.hostname or ""
+    host = parts.hostname or ""
     if parts.port:
-        netloc = f"{netloc}:{parts.port}"
+        host = f"{host}:{parts.port}"
+    netloc = host
     if parts.username or parts.password:
-        netloc = f"{parts.username or 'user'}:{placeholder_name(server, 'URL_PASSWORD')}@{netloc}"
-        result.redacted("url.userinfo", "credentials replaced by a placeholder")
+        user = parts.username or ""
+        if parts.password or (user and looks_like_secret(None, user)):
+            user = placeholder_name(server, "URL_USER") if user or parts.password else ""
+            result.redacted("url.userinfo", "credentials replaced by a placeholder")
+        pwd = placeholder_name(server, "URL_PASSWORD") if parts.password else ""
+        if pwd and user:
+            netloc = f"{user}:{pwd}@{host}"
+        elif pwd:
+            netloc = f":{pwd}@{host}"
+        elif user:
+            netloc = f"{user}@{host}"
     query_pairs = []
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
         if looks_like_secret(key, value):
@@ -102,7 +120,9 @@ def _scrub_args(args: Any, server: str, result: ConvertResult) -> list[str]:
         text = str(item)
         if _has_env_placeholder(text):
             out.append(_translate_env_placeholder(text))
-        elif looks_like_secret(None, text) and not text.startswith("-") and "/" not in text:
+        elif looks_like_secret(None, text) and not text.startswith("-") and not _looks_like_path_token(
+            text
+        ):
             out.append(placeholder_name(server, f"ARG{index}"))
             result.redacted(
                 f"args[{index}]", "credential-looking argument replaced by a placeholder"

@@ -29,6 +29,16 @@ def test_dedupe_mcp_prefers_target_order():
     assert not notes
 
 
+def test_dedupe_mcp_keeps_target_rank_when_tool_reappears_in_defaults():
+    """``cursor`` in both ``--target`` and the default order must not lose rank."""
+    fragments = [
+        ("claude", {"dependencies": {"mcp": [{"name": "shared", "command": "claude-cmd"}]}}),
+        ("cursor", {"dependencies": {"mcp": [{"name": "shared", "command": "cursor-cmd"}]}}),
+    ]
+    entries, _ = _dedupe_mcp(fragments, ("cursor",))
+    assert entries[0]["command"] == "cursor-cmd"
+
+
 def test_dedupe_mcp_reports_divergent_definitions():
     fragments = [
         ("claude", {"dependencies": {"mcp": [{"name": "x", "command": "a"}]}}),

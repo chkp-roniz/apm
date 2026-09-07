@@ -230,7 +230,13 @@ def _staged_entries(items: list[WriteItem], staging_apm: Path) -> list[str]:
     return rels
 
 
-def commit(staging_apm: Path, apm_dir: Path, rels: list[str]) -> list[str]:
+def commit(
+    staging_apm: Path,
+    apm_dir: Path,
+    rels: list[str],
+    *,
+    overwrite_rels: frozenset[str] = frozenset(),
+) -> list[str]:
     """Move staged entries into place; roll back on the first failure."""
     committed: list[str] = []
     try:
@@ -240,13 +246,18 @@ def commit(staging_apm: Path, apm_dir: Path, rels: list[str]) -> list[str]:
                 continue
             target = ensure_path_within(apm_dir / rel, apm_dir)
             if target.exists():
-                if (
-                    target.is_file()
-                    and source.is_file()
-                    and target.read_bytes() == source.read_bytes()
-                ):
-                    continue  # identical shared file (e.g. a hook script) already present
-                raise FileExistsError(rel)
+                if rel not in overwrite_rels:
+                    if (
+                        target.is_file()
+                        and source.is_file()
+                        and target.read_bytes() == source.read_bytes()
+                    ):
+                        continue  # identical shared file (e.g. a hook script) already present
+                    raise FileExistsError(rel)
+                if target.is_dir():
+                    safe_rmtree(target, apm_dir)
+                else:
+                    target.unlink()
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, target)
             committed.append(rel)
@@ -261,6 +272,15 @@ def commit(staging_apm: Path, apm_dir: Path, rels: list[str]) -> list[str]:
     return committed
 
 
+def _tool_rank_order(preferred: tuple[str, ...]) -> dict[str, int]:
+    """First occurrence wins so ``--target`` order is not overwritten by defaults."""
+    seen: list[str] = []
+    for tool in [*preferred, *_DEFAULT_MCP_TOOL_ORDER]:
+        if tool not in seen:
+            seen.append(tool)
+    return {tool: index for index, tool in enumerate(seen)}
+
+
 def _dedupe_mcp(
     fragments: list[tuple[str, Mapping[str, Any]]], preferred: tuple[str, ...]
 ) -> tuple[list[dict], list[str]]:
@@ -270,7 +290,7 @@ def _dedupe_mcp(
     default client order); the first definition of a name wins, identical
     cores merge their ``extra`` blocks, and divergent cores are reported.
     """
-    order = {tool: index for index, tool in enumerate([*preferred, *_DEFAULT_MCP_TOOL_ORDER])}
+    order = _tool_rank_order(preferred)
     ranked = sorted(
         enumerate(fragments), key=lambda item: (order.get(item[1][0], len(order)), item[0])
     )
@@ -552,6 +572,19 @@ def run_write(
             else:
                 logger.error("Nothing could be imported.")
             return 1
+        if fmt != "text" and (importable or targets):
+            from apm_cli.utils.console import set_console_stderr
+
+            set_console_stderr(True)
+            _log_plan(
+                plan,
+                to_write,
+                preview_notes,
+                problems,
+                logger=logger,
+                apm_display=apm_display,
+                manifest_name=manifest.name,
+            )
         if not yes:
             if not sys.stdin.isatty():
                 logger.error("Non-interactive shell: pass --yes to apply")
@@ -583,10 +616,13 @@ def run_write(
         manifest_before = manifest.read_bytes() if manifest.is_file() else None
         provenance_before = provenance.path.read_bytes() if provenance.path.is_file() else None
         rels = _staged_entries(to_write, staging_apm)
+        overwrite_rels = frozenset(
+            i.dest_rel for i in importable if i.decision == "refresh"
+        )
         try:
             if rels:
                 apm_dir.mkdir(parents=True, exist_ok=True)
-            written = commit(staging_apm, apm_dir, rels)
+            written = commit(staging_apm, apm_dir, rels, overwrite_rels=overwrite_rels)
             manifest_notes = mcp_notes + apply_manifest_delta(
                 manifest,
                 targets=targets,
@@ -641,6 +677,10 @@ def run_write(
     finally:
         if staging_root.exists():
             safe_rmtree(staging_root, root)
+        if fmt != "text":
+            from apm_cli.utils.console import _reset_console
+
+            _reset_console()
 
     failures = [i for i in to_write if i.error]
     if fmt != "text":

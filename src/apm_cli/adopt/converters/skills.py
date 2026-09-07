@@ -16,6 +16,23 @@ from .base import emit_markdown, read_markdown, refuse_credentials
 _TEXT_SUFFIXES = frozenset(
     {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".py", ".js", ".ts", ".env"}
 )
+_REFUSED_SKILL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".crt", ".netrc"})
+_REFUSED_SKILL_NAMES = frozenset({"id_rsa", "id_ed25519", "id_ecdsa", "credentials", "secrets"})
+
+
+def _scan_skill_file(path: Path) -> None:
+    name_lower = path.name.lower()
+    if name_lower in _REFUSED_SKILL_NAMES or path.suffix.lower() in _REFUSED_SKILL_SUFFIXES:
+        raise ConvertError(f"{path.name}: credential file refused")
+    if path.suffix not in _TEXT_SUFFIXES and path.suffix != "":
+        return
+    data = path.read_text(encoding="utf-8", errors="ignore")
+    if "\x00" in data[:8192]:
+        return
+    try:
+        refuse_credentials(data)
+    except ConvertError as exc:
+        raise ConvertError(f"{path.name}: {exc}") from None
 
 
 def assert_no_symlinks(directory: Path) -> None:
@@ -48,12 +65,9 @@ class SkillDirConverter:
         if total > ctx.limits.max_file_bytes * 10:
             raise ConvertError("skill directory exceeds the size limit")
         result = ConvertResult()
-        for text_file in source.rglob("*"):
-            if text_file.is_file() and text_file.suffix in _TEXT_SUFFIXES:
-                try:
-                    refuse_credentials(text_file.read_text(encoding="utf-8", errors="ignore"))
-                except ConvertError as exc:
-                    raise ConvertError(f"{text_file.name}: {exc}") from None
+        for skill_file in source.rglob("*"):
+            if skill_file.is_file() and not skill_file.is_symlink():
+                _scan_skill_file(skill_file)
         meta, body = read_markdown(skill_md, ctx.limits.max_file_bytes, result)
         expected = dest.name
         ok, _reason = validate_skill_name(expected)
