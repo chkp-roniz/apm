@@ -267,6 +267,24 @@ def test_write_refuses_without_yes_when_not_interactive(in_project: Path):
     assert not (in_project / ".apm").exists()
 
 
+def test_apply_shows_migration_plan_before_cancel(in_project: Path):
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply"], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert "Migration plan" in result.output
+    assert "Will write" in result.output
+    assert not (in_project / ".apm").exists()
+
+
+def test_apply_json_cancel_emits_cancelled_status(in_project: Path):
+    result = CliRunner().invoke(
+        cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["write"]["status"] == "cancelled"
+    assert not (in_project / ".apm").exists()
+
+
 def test_write_skips_locally_modified_import(in_project: Path):
     assert CliRunner().invoke(cli, ["init", "--discover", "--write", "--yes"]).exit_code == 0
     target = in_project / ".apm/instructions/python.instructions.md"
@@ -373,8 +391,7 @@ def test_failed_apply_rolls_back_everything(in_project: Path):
     (in_project / ".apm").write_text("not a directory\n", encoding="utf-8")
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
     assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["write"]["status"] == "failed"
     assert (in_project / ".apm").is_file()
     assert not (in_project / "apm.yml").exists()
-    assert "rolled back" in (
-        result.output + result.stderr if hasattr(result, "stderr") else result.output
-    )

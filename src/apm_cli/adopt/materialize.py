@@ -302,7 +302,42 @@ def _dedupe_mcp(
     return list(by_name.values()), notes
 
 
-def _describe_plan(
+def _build_write_dict(
+    *,
+    status: str,
+    written: list[str],
+    failures: list[WriteItem],
+    plan: WritePlan,
+    manifest_notes: list[str],
+    to_write: list[WriteItem],
+    validation_problems: list[str] | None = None,
+) -> dict[str, Any]:
+    section: dict[str, Any] = {
+        "status": status,
+        "written": written,
+        "failed": [{"path": i.finding.display_path, "reason": i.error} for i in failures],
+        "skipped": [{"path": f.display_path, "reason": r} for f, r in plan.skipped],
+        "manifest": manifest_notes,
+        "changes": {
+            i.dest_rel: [c.to_dict() for c in i.result.changes]
+            for i in to_write
+            if i.result is not None
+        },
+    }
+    if validation_problems:
+        section["validation_errors"] = validation_problems
+    return section
+
+
+def _emit_write_report(report: AdoptionReport, fmt: str, write_section: dict[str, Any]) -> None:
+    payload = report.to_dict()
+    payload["write"] = write_section
+    click.echo(
+        json.dumps(payload, indent=2, sort_keys=True) if fmt == "json" else _yaml(payload)
+    )
+
+
+def _log_plan(
     plan: WritePlan,
     to_write: list[WriteItem],
     manifest_notes: list[str],
@@ -312,13 +347,12 @@ def _describe_plan(
     apm_display: str,
     manifest_name: str,
 ) -> None:
-    """Print everything the user is about to approve: files, losses, skips, manifest edits."""
+    """Log the migration plan through CommandLogger (safe for machine-format stdout)."""
     file_items = [
         i for i in to_write if i.finding.kind is not HarnessKind.MCP_SERVER and not i.error
     ]
     mcp_items = [i for i in to_write if i.finding.kind is HarnessKind.MCP_SERVER and not i.error]
     failures = [i for i in to_write if i.error]
-    click.echo()
     logger.info("Migration plan")
     if file_items:
         logger.info(f"Will write {len(file_items)} file(s) into {apm_display}/:")
@@ -355,8 +389,37 @@ def _describe_plan(
             logger.tree_item(problem)
 
 
+def _describe_plan(
+    plan: WritePlan,
+    to_write: list[WriteItem],
+    manifest_notes: list[str],
+    validation_problems: list[str],
+    *,
+    logger: CommandLogger,
+    apm_display: str,
+    manifest_name: str,
+) -> None:
+    """Print everything the user is about to approve: files, losses, skips, manifest edits."""
+    click.echo()
+    _log_plan(
+        plan,
+        to_write,
+        manifest_notes,
+        validation_problems,
+        logger=logger,
+        apm_display=apm_display,
+        manifest_name=manifest_name,
+    )
+
+
 def _rollback(
-    apm_dir: Path, committed: list[str], manifest: Path, manifest_before: bytes | None
+    apm_dir: Path,
+    committed: list[str],
+    manifest: Path,
+    manifest_before: bytes | None,
+    *,
+    provenance_path: Path | None = None,
+    provenance_before: bytes | None = None,
 ) -> None:
     """Undo a partially applied import so files, provenance and apm.yml stay consistent."""
     for rel in committed:
@@ -369,6 +432,11 @@ def _rollback(
         manifest.unlink(missing_ok=True)
     else:
         manifest.write_bytes(manifest_before)
+    if provenance_path is not None:
+        if provenance_before is None:
+            provenance_path.unlink(missing_ok=True)
+        else:
+            provenance_path.write_bytes(provenance_before)
 
 
 def run_write(
@@ -451,10 +519,38 @@ def run_write(
                 manifest_name=manifest.name,
             )
         if problems:
+            if fmt != "text":
+                _emit_write_report(
+                    report,
+                    fmt,
+                    _build_write_dict(
+                        status="failed",
+                        written=[],
+                        failures=failures,
+                        plan=plan,
+                        manifest_notes=preview_notes,
+                        to_write=to_write,
+                        validation_problems=problems,
+                    ),
+                )
             return 1
         importable = [i for i in to_write if not i.error]
         if not importable and not targets:
-            logger.error("Nothing could be imported.")
+            if fmt != "text":
+                _emit_write_report(
+                    report,
+                    fmt,
+                    _build_write_dict(
+                        status="failed",
+                        written=[],
+                        failures=failures,
+                        plan=plan,
+                        manifest_notes=preview_notes,
+                        to_write=to_write,
+                    ),
+                )
+            else:
+                logger.error("Nothing could be imported.")
             return 1
         if not yes:
             if not sys.stdin.isatty():
@@ -462,12 +558,30 @@ def run_write(
                 return 1
             prompt = f"Apply {len(importable)} change(s) and update {manifest.name}?"
             if failures:
-                prompt = f"Apply {len(importable)} change(s), leave out {len(failures)} failed, and update {manifest.name}?"
+                prompt = (
+                    f"Apply {len(importable)} change(s), leave out {len(failures)} failed, "
+                    f"and update {manifest.name}?"
+                )
             if not click.confirm(prompt, default=False):
-                logger.info("Cancelled; nothing written.")
+                if fmt != "text":
+                    _emit_write_report(
+                        report,
+                        fmt,
+                        _build_write_dict(
+                            status="cancelled",
+                            written=[],
+                            failures=failures,
+                            plan=plan,
+                            manifest_notes=preview_notes,
+                            to_write=to_write,
+                        ),
+                    )
+                else:
+                    logger.info("Cancelled; nothing written.")
                 return 0
 
         manifest_before = manifest.read_bytes() if manifest.is_file() else None
+        provenance_before = provenance.path.read_bytes() if provenance.path.is_file() else None
         rels = _staged_entries(to_write, staging_apm)
         try:
             if rels:
@@ -497,8 +611,29 @@ def run_write(
             if written:
                 provenance.save()
         except Exception as exc:
-            _rollback(apm_dir, written, manifest, manifest_before)
-            logger.error(f"Import failed ({type(exc).__name__}); all changes were rolled back")
+            _rollback(
+                apm_dir,
+                written,
+                manifest,
+                manifest_before,
+                provenance_path=provenance.path,
+                provenance_before=provenance_before,
+            )
+            if fmt != "text":
+                _emit_write_report(
+                    report,
+                    fmt,
+                    _build_write_dict(
+                        status="failed",
+                        written=[],
+                        failures=failures,
+                        plan=plan,
+                        manifest_notes=preview_notes,
+                        to_write=to_write,
+                    ),
+                )
+            else:
+                logger.error(f"Import failed ({type(exc).__name__}); all changes were rolled back")
             written = []
             status = "failed"
             return 1
@@ -509,21 +644,17 @@ def run_write(
 
     failures = [i for i in to_write if i.error]
     if fmt != "text":
-        payload = report.to_dict()
-        payload["write"] = {
-            "status": status,
-            "written": written,
-            "failed": [{"path": i.finding.display_path, "reason": i.error} for i in failures],
-            "skipped": [{"path": f.display_path, "reason": r} for f, r in plan.skipped],
-            "manifest": manifest_notes,
-            "changes": {
-                i.dest_rel: [c.to_dict() for c in i.result.changes]
-                for i in to_write
-                if i.result is not None
-            },
-        }
-        click.echo(
-            json.dumps(payload, indent=2, sort_keys=True) if fmt == "json" else _yaml(payload)
+        _emit_write_report(
+            report,
+            fmt,
+            _build_write_dict(
+                status=status,
+                written=written,
+                failures=failures,
+                plan=plan,
+                manifest_notes=manifest_notes,
+                to_write=to_write,
+            ),
         )
     else:
         click.echo()

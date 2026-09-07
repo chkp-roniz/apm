@@ -198,6 +198,9 @@ def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path:
     assert "echo apm-owned" not in json.dumps(cursor_hooks)
     mcp = json.loads(after_install.file(".cursor/mcp.json").content)
     assert "fixture" in mcp["mcpServers"]
+    assert after_install.lockfile_bytes is not None
+    lock = yaml.safe_load(after_install.lockfile_bytes)
+    assert isinstance(lock, dict) and lock.get("dependencies")
 
     rerun = runner.run(
         ("init", "--discover", "--apply", "--yes", "--format", "json"),
