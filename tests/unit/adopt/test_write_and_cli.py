@@ -131,9 +131,18 @@ def test_mcp_entry_redacts_secrets_and_keeps_placeholders():
     from urllib.parse import urlsplit
 
     parsed = urlsplit(remote["url"])
-    assert parsed.hostname == "h" and parsed.username == "u"
+    assert parsed.hostname == "h"
+    assert parsed.username == "${R_URL_USER}"
     assert parsed.password == "${R_URL_PASSWORD}"
     assert remote["headers"]["Authorization"] == "Bearer ${TOK}"
+    token_url = to_manifest_entry(
+        "cursor",
+        "remote",
+        {"type": "http", "url": f"https://{FAKE_TOKEN}@mcp.example.com/sse"},
+        ConvertResult(),
+    )
+    assert FAKE_TOKEN not in json.dumps(token_url)
+    assert "${" in urlsplit(token_url["url"]).username
     assert placeholder_name("github", "GITHUB_TOKEN") == "${GITHUB_TOKEN}"
     assert looks_like_secret("api_key", "x") and not looks_like_secret("MODE", "fast")
 
@@ -275,6 +284,17 @@ def test_apply_shows_migration_plan_before_cancel(in_project: Path):
     assert not (in_project / ".apm").exists()
 
 
+def test_apply_json_shows_plan_before_cancel(in_project: Path):
+    result = CliRunner().invoke(
+        cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Migration plan" in result.output
+    payload = json.loads(result.output)
+    assert payload["write"]["status"] == "cancelled"
+    assert not (in_project / ".apm").exists()
+
+
 def test_apply_json_cancel_emits_cancelled_status(in_project: Path):
     result = CliRunner().invoke(
         cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
@@ -283,6 +303,33 @@ def test_apply_json_cancel_emits_cancelled_status(in_project: Path):
     payload = json.loads(result.output)
     assert payload["write"]["status"] == "cancelled"
     assert not (in_project / ".apm").exists()
+
+
+def test_refresh_reimports_changed_agent(in_project: Path):
+    assert CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes"]).exit_code == 0
+    agent = in_project / ".claude/agents/reviewer.md"
+    agent.write_text(
+        "---\nname: reviewer\ndescription: Updated\ntools: Read\n---\nRefreshed body.\n",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    imported = (in_project / ".apm/agents/reviewer.agent.md").read_text(encoding="utf-8")
+    assert "Refreshed body." in imported
+    assert "agents/reviewer.agent.md" in json.loads(result.output)["write"]["written"]
+
+
+def test_skill_refuses_pem_credential_file(in_project: Path):
+    (in_project / ".claude/skills/deploy/key.pem").write_text(
+        "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    failed = {f["path"]: f["reason"] for f in payload["write"]["failed"]}
+    assert any("key.pem" in reason for reason in failed.values())
+    assert not (in_project / ".apm/skills/deploy").exists()
 
 
 def test_write_skips_locally_modified_import(in_project: Path):

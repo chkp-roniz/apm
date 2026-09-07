@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from apm_cli.utils.atomic_io import write_text_lf
+from apm_cli.utils.atomic_io import atomic_write_text
 from apm_cli.utils.content_hash import compute_file_hash
 
 SIDECAR_NAME = ".import-sources.json"
@@ -80,7 +80,7 @@ class ImportSources:
             "entries": {dest: rec.to_dict() for dest, rec in sorted(self.entries.items())},
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        write_text_lf(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     def decide(self, dest_rel: str, dest_abs: Path, source_hash: str | None) -> Decision:
         """Apply the idempotency table for one destination."""
