@@ -252,7 +252,7 @@ def test_write_materializes_merges_and_is_idempotent(in_project: Path):
 
     again = CliRunner().invoke(cli, ["init", "--discover", "--write", "--yes", "--format", "json"])
     assert again.exit_code == 0, again.output
-    payload = json.loads(again.output)
+    payload = json.loads(again.stdout)
     assert payload["write"]["written"] == []
     assert yaml.safe_load((in_project / "apm.yml").read_text(encoding="utf-8")) == manifest
 
@@ -276,7 +276,10 @@ def test_write_refuses_without_yes_when_not_interactive(in_project: Path):
     assert not (in_project / ".apm").exists()
 
 
-def test_apply_shows_migration_plan_before_cancel(in_project: Path):
+def test_apply_shows_migration_plan_before_cancel(
+    in_project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("apm_cli.adopt.materialize._stdin_is_tty", lambda: True)
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply"], input="n\n")
     assert result.exit_code == 0, result.output
     assert "Migration plan" in result.output
@@ -284,23 +287,27 @@ def test_apply_shows_migration_plan_before_cancel(in_project: Path):
     assert not (in_project / ".apm").exists()
 
 
-def test_apply_json_shows_plan_before_cancel(in_project: Path):
+def test_apply_json_shows_plan_before_cancel(in_project: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("apm_cli.adopt.materialize._stdin_is_tty", lambda: True)
     result = CliRunner().invoke(
         cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
     )
     assert result.exit_code == 0, result.output
-    assert "Migration plan" in result.output
-    payload = json.loads(result.output)
+    assert "Migration plan" in result.stderr
+    payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "cancelled"
     assert not (in_project / ".apm").exists()
 
 
-def test_apply_json_cancel_emits_cancelled_status(in_project: Path):
+def test_apply_json_cancel_emits_cancelled_status(
+    in_project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("apm_cli.adopt.materialize._stdin_is_tty", lambda: True)
     result = CliRunner().invoke(
         cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "cancelled"
     assert not (in_project / ".apm").exists()
 
@@ -316,7 +323,7 @@ def test_refresh_reimports_changed_agent(in_project: Path):
     assert result.exit_code == 0, result.output
     imported = (in_project / ".apm/agents/reviewer.agent.md").read_text(encoding="utf-8")
     assert "Refreshed body." in imported
-    assert "agents/reviewer.agent.md" in json.loads(result.output)["write"]["written"]
+    assert "agents/reviewer.agent.md" in json.loads(result.stdout)["write"]["written"]
 
 
 def test_skill_refuses_pem_credential_file(in_project: Path):
@@ -326,7 +333,7 @@ def test_skill_refuses_pem_credential_file(in_project: Path):
     )
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
     assert result.exit_code == 1, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     failed = {f["path"]: f["reason"] for f in payload["write"]["failed"]}
     assert any("key.pem" in reason for reason in failed.values())
     assert not (in_project / ".apm/skills/deploy").exists()
@@ -341,7 +348,7 @@ def test_write_skips_locally_modified_import(in_project: Path):
     assert result.exit_code == 0, result.output
     assert "local edit" in target.read_text(encoding="utf-8")
     assert (
-        "instructions/python.instructions.md" not in json.loads(result.output)["write"]["written"]
+        "instructions/python.instructions.md" not in json.loads(result.stdout)["write"]["written"]
     )
 
 
@@ -417,7 +424,7 @@ def test_apply_alias_and_credential_refusal(in_project: Path):
     write(in_project / ".claude/rules/leaky.md", f"Use token {FAKE_TOKEN} for CI.\n")
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
     assert result.exit_code == 1, result.output  # partial import is unmistakable in exit status
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "partial"
     assert (in_project / ".apm/instructions/python.instructions.md").is_file()
     assert not (in_project / ".apm/instructions/leaky.instructions.md").exists()
@@ -438,7 +445,67 @@ def test_failed_apply_rolls_back_everything(in_project: Path):
     (in_project / ".apm").write_text("not a directory\n", encoding="utf-8")
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
     assert result.exit_code == 1, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "failed"
     assert (in_project / ".apm").is_file()
     assert not (in_project / "apm.yml").exists()
+
+
+def test_skill_refuses_private_key_in_conf_extension(in_project: Path):
+    (in_project / ".claude/skills/deploy/secret.conf").write_text(
+        "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    failed = {f["path"]: f["reason"] for f in payload["write"]["failed"]}
+    assert any("secret.conf" in reason for reason in failed.values())
+    assert not (in_project / ".apm/skills/deploy").exists()
+
+
+def test_mcp_redacts_slash_containing_secret_argument():
+    result = ConvertResult()
+    entry = to_manifest_entry(
+        "claude",
+        "svc",
+        {"command": "tool", "args": [FAKE_TOKEN]},
+        result,
+    )
+    assert entry["args"] == ["${SVC_ARG0}"]
+    assert FAKE_TOKEN not in json.dumps(entry)
+
+
+def test_refresh_reimports_changed_rule(in_project: Path):
+    assert CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes"]).exit_code == 0
+    rule = in_project / ".claude/rules/python.md"
+    rule.write_text('---\npaths:\n  - "lib/**"\n---\nRefreshed rule.\n', encoding="utf-8")
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    imported = (in_project / ".apm/instructions/python.instructions.md").read_text(encoding="utf-8")
+    assert "lib/**" in imported and "Refreshed rule." in imported
+    assert "instructions/python.instructions.md" in json.loads(result.stdout)["write"]["written"]
+
+
+def test_apply_json_noninteractive_refusal_emits_structured_status(in_project: Path):
+    result = CliRunner().invoke(cli, ["init", "--discover", "--apply", "--format", "json"])
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["write"]["status"] == "refused"
+    assert "pass --yes" in result.stderr.replace("\n", " ")
+    assert not (in_project / ".apm").exists()
+
+
+def test_apply_json_tty_cancel_keeps_stdout_parseable(
+    in_project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("apm_cli.adopt.materialize._stdin_is_tty", lambda: True)
+    result = CliRunner().invoke(
+        cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["write"]["status"] == "cancelled"
+    assert "Migration plan" in result.stderr
+    assert "Apply " in result.stderr
+    assert not (in_project / ".apm").exists()

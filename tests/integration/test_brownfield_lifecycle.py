@@ -29,6 +29,7 @@ pytestmark = [
 
 _FAKE_TOKEN = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12"
 _INSTALL_ARGS = ("install", "--target", "cursor", "--no-policy", "--parallel-downloads", "0")
+_INSTALL_SOURCE_ARGS = ("install", "--target", "claude", "--no-policy", "--parallel-downloads", "0")
 
 _ORIGINALS: dict[str, str] = {
     ".claude/rules/python.md": '---\npaths:\n  - "src/**/*.py"\n---\nUse type hints.\n',
@@ -178,9 +179,21 @@ def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path:
     assert manifest["targets"] == ["claude", "cursor"]
     assert [e["name"] for e in manifest["dependencies"]["mcp"]] == ["fixture"]
     assert "${FIXTURE_TOKEN}" in after_apply.manifest_bytes.decode("utf-8")
+    assert after_apply.file(".apm/hooks/claude-native.json").content
     hooks = json.loads(after_apply.file(".apm/hooks/claude-native.json").content)
     commands = [h["command"] for e in hooks["hooks"]["PreToolUse"] for h in e["hooks"]]
     assert commands == ["./.claude/hooks/notify.sh"], commands  # APM-owned entry excluded
+
+    installed_source = runner.run(
+        _INSTALL_SOURCE_ARGS, scenario_id="install-claude", cwd=project, env=environment
+    )
+    assert installed_source.returncode == 0, _evidence(installed_source)
+    after_source_install = _snapshot(project)
+    for rel in (".claude/hooks/notify.sh", "CLAUDE.md", ".mcp.json"):
+        assert after_source_install.file(rel).content == before.file(rel).content, (
+            f"{rel} changed during source-target install"
+        )
+    assert after_source_install.lockfile_bytes is not None
 
     installed = runner.run(
         _INSTALL_ARGS, scenario_id="install-cursor", cwd=project, env=environment
@@ -200,7 +213,7 @@ def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path:
     assert "fixture" in mcp["mcpServers"]
     assert after_install.lockfile_bytes is not None
     lock = yaml.safe_load(after_install.lockfile_bytes)
-    assert isinstance(lock, dict) and lock.get("dependencies")
+    assert isinstance(lock, dict) and "dependencies" in lock
 
     rerun = runner.run(
         ("init", "--discover", "--apply", "--yes", "--format", "json"),
@@ -256,13 +269,14 @@ def test_brownfield_failed_apply_rolls_back(tmp_path: Path, apm_binary_path: Pat
     before = _snapshot(project, imported=False)
 
     applied = runner.run(
-        ("init", "--discover", "--apply", "--yes"),
+        ("init", "--discover", "--apply", "--yes", "--format", "json"),
         scenario_id="failed-apply",
         cwd=project,
         env=environment,
     )
     assert applied.returncode == 1, _evidence(applied)
-    assert "rolled back" in applied.stdout + applied.stderr
+    payload = json.loads(applied.stdout)
+    assert payload["write"]["status"] == "failed"
     after = _snapshot(project, imported=False)
     _originals_unchanged(before, after)
     assert (project / ".apm").is_file()
