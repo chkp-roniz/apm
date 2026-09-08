@@ -21,6 +21,7 @@ from apm_cli.core.target_detection import manifest_targets_from_target_option
 from apm_cli.hook_contract import HookContractError, parse_hook_source
 from apm_cli.integration.skill_integrator import normalize_skill_name
 from apm_cli.primitives.parser import parse_primitive_file, parse_skill_file
+from apm_cli.utils.console import STATUS_SYMBOLS
 from apm_cli.utils.path_security import ensure_path_within, safe_rmtree
 
 from .converters import (
@@ -423,6 +424,11 @@ def _emit_machine_write_report(
     _emit_write_report(report, fmt, write_section)
 
 
+def _plan_status(message: str, *, symbol: str = "info") -> None:
+    """Write one migration-plan line to stderr without the global console singleton."""
+    click.echo(f"{STATUS_SYMBOLS.get(symbol, '[i]')} {message}", err=True)
+
+
 def _log_plan(
     plan: WritePlan,
     to_write: list[WriteItem],
@@ -432,47 +438,73 @@ def _log_plan(
     logger: CommandLogger,
     apm_display: str,
     manifest_name: str,
+    stderr_only: bool = False,
 ) -> None:
-    """Log the migration plan through CommandLogger (safe for machine-format stdout)."""
+    """Log the migration plan; use *stderr_only* for JSON/YAML apply (xdist-safe)."""
+
+    def info(message: str) -> None:
+        if stderr_only:
+            _plan_status(message, symbol="info")
+        else:
+            logger.info(message)
+
+    def tree_item(message: str) -> None:
+        if stderr_only:
+            click.echo(message, err=True)
+        else:
+            logger.tree_item(message)
+
+    def warning(message: str) -> None:
+        if stderr_only:
+            _plan_status(message, symbol="warning")
+        else:
+            logger.warning(message)
+
+    def error(message: str) -> None:
+        if stderr_only:
+            _plan_status(message, symbol="error")
+        else:
+            logger.error(message)
+
     file_items = [
         i for i in to_write if i.finding.kind is not HarnessKind.MCP_SERVER and not i.error
     ]
     mcp_items = [i for i in to_write if i.finding.kind is HarnessKind.MCP_SERVER and not i.error]
     failures = [i for i in to_write if i.error]
-    logger.info("Migration plan")
+    info("Migration plan")
     if file_items:
-        logger.info(f"Will write {len(file_items)} file(s) into {apm_display}/:")
+        info(f"Will write {len(file_items)} file(s) into {apm_display}/:")
         for item in file_items:
             summary = summarize_changes(item.result.changes) if item.result else ""
-            logger.tree_item(
+            tree_item(
                 f"{item.finding.display_path} -> {item.dest_rel} ({item.decision}) [{summary}]"
             )
             for change in item.result.changes if item.result else ():
                 if change.severity == "warning":
-                    logger.tree_item(f"    {change.path}: {change.reason}")
+                    tree_item(f"    {change.path}: {change.reason}")
     if mcp_items:
-        logger.info(f"Will add {len(mcp_items)} MCP server(s) to {manifest_name}:")
+        info(f"Will add {len(mcp_items)} MCP server(s) to {manifest_name}:")
         for item in mcp_items:
-            logger.tree_item(item.finding.display_path)
+            tree_item(item.finding.display_path)
     if manifest_notes:
-        logger.info(f"{manifest_name} changes:")
+        info(f"{manifest_name} changes:")
         for note in manifest_notes:
-            logger.tree_item(note)
+            tree_item(note)
     unchanged = [i for i in plan.items if i.decision not in ("write", "refresh")]
     if unchanged or plan.skipped:
-        logger.info("Not written:")
+        info("Not written:")
         for item in unchanged:
-            logger.tree_item(f"{item.finding.display_path}: {item.decision}")
+            tree_item(f"{item.finding.display_path}: {item.decision}")
         for finding, reason in plan.skipped:
-            logger.tree_item(f"{finding.display_path}: {reason}")
+            tree_item(f"{finding.display_path}: {reason}")
     if failures:
-        logger.warning(f"{len(failures)} item(s) cannot be imported and will be left out:")
+        warning(f"{len(failures)} item(s) cannot be imported and will be left out:")
         for item in failures:
-            logger.tree_item(f"{item.finding.display_path}: {item.error}")
+            tree_item(f"{item.finding.display_path}: {item.error}")
     if validation_problems:
-        logger.error("Staged files failed validation; nothing can be written:")
+        error("Staged files failed validation; nothing can be written:")
         for problem in validation_problems[:20]:
-            logger.tree_item(problem)
+            tree_item(problem)
 
 
 def _describe_plan(
@@ -650,9 +682,6 @@ def run_write(
                 logger.error("Nothing could be imported.")
             return 1
         if fmt != "text" and (importable or targets):
-            from apm_cli.utils.console import set_console_stderr
-
-            set_console_stderr(True)
             _log_plan(
                 plan,
                 to_write,
@@ -661,6 +690,7 @@ def run_write(
                 logger=logger,
                 apm_display=apm_display,
                 manifest_name=manifest.name,
+                stderr_only=True,
             )
         if not yes:
             if not _stdin_is_tty():
