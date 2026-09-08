@@ -75,11 +75,16 @@ def _scrub_map(
 
 
 def _looks_like_path_token(text: str) -> bool:
+    """Return whether *text* is clearly a filesystem path, not an opaque token."""
     if text.startswith(("/", "./", "../", "~")):
         return True
     if len(text) >= 3 and text[1] == ":" and text[0].isalpha():
         return True
-    return "/" in text and "://" not in text
+    if "/" in text and "://" not in text:
+        last = text.rsplit("/", 1)[-1]
+        if "." in last and not last.startswith("."):
+            return True
+    return False
 
 
 def _scrub_url(url: str, server: str, result: ConvertResult) -> str:
@@ -120,8 +125,10 @@ def _scrub_args(args: Any, server: str, result: ConvertResult) -> list[str]:
         text = str(item)
         if _has_env_placeholder(text):
             out.append(_translate_env_placeholder(text))
-        elif looks_like_secret(None, text) and not text.startswith("-") and not _looks_like_path_token(
-            text
+        elif (
+            looks_like_secret(None, text)
+            and not text.startswith("-")
+            and not _looks_like_path_token(text)
         ):
             out.append(placeholder_name(server, f"ARG{index}"))
             result.redacted(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -61,6 +62,51 @@ _DEFAULT_MCP_TOOL_ORDER: tuple[str, ...] = (
     "antigravity",
 )
 _VALIDATION_ADVISORIES = ("instruction will apply globally", "Missing 'description'")
+
+
+@dataclass
+class _CommitTxn:
+    """Tracks new writes and backups of replaced destinations for rollback."""
+
+    committed: list[str] = field(default_factory=list)
+    replaced: dict[str, Path] = field(default_factory=dict)
+
+
+def _stdin_is_tty() -> bool:
+    """Return whether sys.stdin is a TTY (patchable in tests)."""
+    try:
+        return bool(sys.stdin.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def _backup_destination(target: Path, backup_root: Path) -> Path:
+    """Copy *target* into *backup_root* so a failed import can restore it."""
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup = backup_root / target.name
+    suffix = 0
+    while backup.exists():
+        suffix += 1
+        backup = backup_root / f"{target.name}.{suffix}"
+    if target.is_dir():
+        shutil.copytree(target, backup, symlinks=False)
+    else:
+        shutil.copy2(target, backup)
+    return backup
+
+
+def _restore_destination(target: Path, backup: Path, apm_dir: Path) -> None:
+    """Put a backed-up file or directory back at *target*."""
+    ensure_path_within(target, apm_dir)
+    if target.is_dir():
+        safe_rmtree(target, apm_dir)
+    else:
+        target.unlink(missing_ok=True)
+    if backup.is_dir():
+        shutil.copytree(backup, target, symlinks=False)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(backup, target)
 
 
 @dataclass
@@ -236,9 +282,12 @@ def commit(
     rels: list[str],
     *,
     overwrite_rels: frozenset[str] = frozenset(),
+    txn: _CommitTxn | None = None,
+    backup_root: Path | None = None,
 ) -> list[str]:
     """Move staged entries into place; roll back on the first failure."""
-    committed: list[str] = []
+    transaction = txn or _CommitTxn()
+    backups = backup_root or staging_apm.parent / ".adopt-backup"
     try:
         for rel in rels:
             source = staging_apm / rel
@@ -254,22 +303,30 @@ def commit(
                     ):
                         continue  # identical shared file (e.g. a hook script) already present
                     raise FileExistsError(rel)
+                transaction.replaced[rel] = _backup_destination(target, backups)
                 if target.is_dir():
                     safe_rmtree(target, apm_dir)
                 else:
                     target.unlink()
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, target)
-            committed.append(rel)
+            transaction.committed.append(rel)
     except Exception:
-        for rel in committed:
-            path = apm_dir / rel
-            if path.is_dir():
-                safe_rmtree(path, apm_dir)
-            else:
-                path.unlink(missing_ok=True)
+        _undo_commit(apm_dir, transaction)
         raise
-    return committed
+    return transaction.committed
+
+
+def _undo_commit(apm_dir: Path, txn: _CommitTxn) -> None:
+    """Remove newly committed paths and restore any replaced destinations."""
+    for rel in reversed(txn.committed):
+        path = apm_dir / rel
+        if path.is_dir():
+            safe_rmtree(path, apm_dir)
+        else:
+            path.unlink(missing_ok=True)
+    for rel, backup in txn.replaced.items():
+        _restore_destination(apm_dir / rel, backup, apm_dir)
 
 
 def _tool_rank_order(preferred: tuple[str, ...]) -> dict[str, int]:
@@ -352,9 +409,18 @@ def _build_write_dict(
 def _emit_write_report(report: AdoptionReport, fmt: str, write_section: dict[str, Any]) -> None:
     payload = report.to_dict()
     payload["write"] = write_section
-    click.echo(
-        json.dumps(payload, indent=2, sort_keys=True) if fmt == "json" else _yaml(payload)
-    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True) if fmt == "json" else _yaml(payload))
+
+
+def _emit_machine_write_report(
+    report: AdoptionReport, fmt: str, write_section: dict[str, Any]
+) -> None:
+    """Emit structured output on stdout after restoring the normal console."""
+    if fmt != "text":
+        from apm_cli.utils.console import _reset_console
+
+        _reset_console()
+    _emit_write_report(report, fmt, write_section)
 
 
 def _log_plan(
@@ -434,7 +500,7 @@ def _describe_plan(
 
 def _rollback(
     apm_dir: Path,
-    committed: list[str],
+    txn: _CommitTxn,
     manifest: Path,
     manifest_before: bytes | None,
     *,
@@ -442,17 +508,13 @@ def _rollback(
     provenance_before: bytes | None = None,
 ) -> None:
     """Undo a partially applied import so files, provenance and apm.yml stay consistent."""
-    for rel in committed:
-        path = apm_dir / rel
-        if path.is_dir():
-            safe_rmtree(path, apm_dir)
-        else:
-            path.unlink(missing_ok=True)
+    if apm_dir.is_dir():
+        _undo_commit(apm_dir, txn)
     if manifest_before is None:
         manifest.unlink(missing_ok=True)
     else:
         manifest.write_bytes(manifest_before)
-    if provenance_path is not None:
+    if provenance_path is not None and provenance_path.parent.is_dir():
         if provenance_before is None:
             provenance_path.unlink(missing_ok=True)
         else:
@@ -499,7 +561,21 @@ def run_write(
     if fmt == "text":
         render(report, "text", logger)
     if not to_write and not targets:
-        logger.info("Nothing to write.")
+        if fmt != "text":
+            _emit_machine_write_report(
+                report,
+                fmt,
+                _build_write_dict(
+                    status="complete",
+                    written=[],
+                    failures=[],
+                    plan=plan,
+                    manifest_notes=[],
+                    to_write=to_write,
+                ),
+            )
+        else:
+            logger.info("Nothing to write.")
         return 0
 
     root.mkdir(parents=True, exist_ok=True)
@@ -509,6 +585,7 @@ def run_write(
     written: list[str] = []
     manifest_notes: list[str] = []
     status = "complete"
+    commit_txn = _CommitTxn()
     try:
         fragments = stage(plan, staging_apm, ctx)
         problems = validate_staged(staging_apm)
@@ -540,7 +617,7 @@ def run_write(
             )
         if problems:
             if fmt != "text":
-                _emit_write_report(
+                _emit_machine_write_report(
                     report,
                     fmt,
                     _build_write_dict(
@@ -557,7 +634,7 @@ def run_write(
         importable = [i for i in to_write if not i.error]
         if not importable and not targets:
             if fmt != "text":
-                _emit_write_report(
+                _emit_machine_write_report(
                     report,
                     fmt,
                     _build_write_dict(
@@ -586,8 +663,21 @@ def run_write(
                 manifest_name=manifest.name,
             )
         if not yes:
-            if not sys.stdin.isatty():
+            if not _stdin_is_tty():
                 logger.error("Non-interactive shell: pass --yes to apply")
+                if fmt != "text":
+                    _emit_machine_write_report(
+                        report,
+                        fmt,
+                        _build_write_dict(
+                            status="refused",
+                            written=[],
+                            failures=failures,
+                            plan=plan,
+                            manifest_notes=preview_notes,
+                            to_write=to_write,
+                        ),
+                    )
                 return 1
             prompt = f"Apply {len(importable)} change(s) and update {manifest.name}?"
             if failures:
@@ -595,9 +685,9 @@ def run_write(
                     f"Apply {len(importable)} change(s), leave out {len(failures)} failed, "
                     f"and update {manifest.name}?"
                 )
-            if not click.confirm(prompt, default=False):
+            if not click.confirm(prompt, default=False, err=True):
                 if fmt != "text":
-                    _emit_write_report(
+                    _emit_machine_write_report(
                         report,
                         fmt,
                         _build_write_dict(
@@ -616,13 +706,18 @@ def run_write(
         manifest_before = manifest.read_bytes() if manifest.is_file() else None
         provenance_before = provenance.path.read_bytes() if provenance.path.is_file() else None
         rels = _staged_entries(to_write, staging_apm)
-        overwrite_rels = frozenset(
-            i.dest_rel for i in importable if i.decision == "refresh"
-        )
+        overwrite_rels = frozenset(i.dest_rel for i in importable if i.decision == "refresh")
         try:
             if rels:
                 apm_dir.mkdir(parents=True, exist_ok=True)
-            written = commit(staging_apm, apm_dir, rels, overwrite_rels=overwrite_rels)
+            written = commit(
+                staging_apm,
+                apm_dir,
+                rels,
+                overwrite_rels=overwrite_rels,
+                txn=commit_txn,
+                backup_root=staging_root / ".adopt-backup",
+            )
             manifest_notes = mcp_notes + apply_manifest_delta(
                 manifest,
                 targets=targets,
@@ -649,14 +744,14 @@ def run_write(
         except Exception as exc:
             _rollback(
                 apm_dir,
-                written,
+                commit_txn,
                 manifest,
                 manifest_before,
                 provenance_path=provenance.path,
                 provenance_before=provenance_before,
             )
             if fmt != "text":
-                _emit_write_report(
+                _emit_machine_write_report(
                     report,
                     fmt,
                     _build_write_dict(
@@ -684,7 +779,7 @@ def run_write(
 
     failures = [i for i in to_write if i.error]
     if fmt != "text":
-        _emit_write_report(
+        _emit_machine_write_report(
             report,
             fmt,
             _build_write_dict(
@@ -723,7 +818,7 @@ def _next_steps(
     flag = " --global" if scope is Scope.USER else ""
     logger.tree_item(f"apm install{flag}                 # deploy .apm/ to the detected targets")
     logger.tree_item(
-        f"apm install{flag} --target cursor # replay the same context on another harness"
+        f"apm install{flag} --target cursor # render the imported context on another harness"
     )
     logger.tree_item("Originals were not modified. Remove them once the APM copies are verified.")
     if any(
@@ -731,9 +826,10 @@ def _next_steps(
         for f in report.findings
     ):
         logger.warning(
-            "apm compile regenerates CLAUDE.md/AGENTS.md/GEMINI.md from .apm/instructions and will "
-            "overwrite hand-authored root files. Commit first, then delete the originals or keep "
-            "AGENTS.md hand-authored with <!-- apm:start -->/<!-- apm:end --> markers."
+            "apm compile only overwrites root context files that carry an APM generated marker. "
+            "Unmarked project-root AGENTS.md, CLAUDE.md, and GEMINI.md are retained with a warning. "
+            "After verifying the .apm/ copies, remove the originals or use managed_section mode "
+            "for AGENTS.md (<!-- apm:start -->/<!-- apm:end --> markers)."
         )
     if any(f.kind is HarnessKind.MCP_SERVER for f in report.findings):
         logger.tree_item(

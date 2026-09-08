@@ -117,17 +117,19 @@ project that already uses APM only sees its hand-authored remainder.
 
 `--apply` never deletes or edits the originals. After verifying the `.apm/`
 copies, remove the originals yourself; until then both are loaded by the
-source harness. `apm compile` regenerates `CLAUDE.md`, `AGENTS.md`, and
-`GEMINI.md` from `.apm/instructions/` and will overwrite hand-authored root
-files, so commit first.
+source harness. `apm compile` only overwrites project-root `CLAUDE.md`,
+`AGENTS.md`, and `GEMINI.md` when they carry an APM generated marker; unmarked
+hand-authored root files are retained with a warning.
 
 ### Migrating between harnesses
 
 ```bash
-apm init --discover --apply --yes      # Claude Code project -> .apm/ + apm.yml
-apm install --target cursor            # same context, rendered for Cursor
+apm init --discover --apply --yes      # import into .apm/ + apm.yml
+apm install --target cursor            # render the imported context on Cursor
 ```
 
+Rules without `applyTo` may stay description-triggered on Cursor but become
+unconditional elsewhere; the migration plan calls out these activation changes.
 Hooks are stored in APM's neutral grammar as `.apm/hooks/<tool>-native.json`
 and re-rendered per target. Events one harness cannot express are kept and
 reported as pass-through so nothing is silently lost.

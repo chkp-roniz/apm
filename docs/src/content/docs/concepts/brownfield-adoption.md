@@ -109,17 +109,27 @@ and flagged as machine-local.
 `--apply` (alias `--write`) stages into a temporary directory inside the project, validates every
 staged file with the parsers `apm install` uses, moves files into `.apm/` only
 if all pass, then updates `apm.yml` with ruamel round-trip loading so comments
-survive. Any file whose content carries a credential-shaped token (GitHub, GitLab,
-AWS, Slack, OpenAI keys, private keys, bearer tokens, URL userinfo) is refused
-with a reason rather than copied. `.apm/.import-sources.json` records source and output hashes for
-idempotent re-runs. At user scope (`--global`) the same layout lands under
+survive. Any file whose content carries credential-shaped tokens (GitHub, GitLab,
+AWS, Slack, OpenAI keys, private keys, bearer tokens, URL userinfo) in common
+text-bearing skill files is refused with a reason rather than copied. This is a
+bounded safeguard, not a guarantee that every secret shape is detected.
+`.apm/.import-sources.json` records source and output hashes for idempotent
+re-runs. At user scope (`--global`) the same layout lands under
 `~/.apm/`, which `apm install --global` treats as its implicit local package.
 
 ## Cut-over
 
 Originals stay in place. Until you remove them, the source harness loads both
-the original and the deployed copy. `apm compile` regenerates `CLAUDE.md`,
-`AGENTS.md`, and `GEMINI.md` from `.apm/instructions/` and overwrites
-hand-authored root files, so commit before compiling, then either delete the
-originals or keep `AGENTS.md` hand-authored with `<!-- apm:start -->` /
-`<!-- apm:end -->` markers and `compilation.agents_md.mode: managed_section`.
+the original and the deployed copy. `apm compile` only overwrites project-root
+`CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` when they carry an APM generated
+marker; unmarked hand-authored root files are retained with a warning. After
+verifying the `.apm/` copies, remove the originals or keep `AGENTS.md`
+hand-authored with `<!-- apm:start -->` / `<!-- apm:end -->` markers and
+`compilation.agents_md.mode: managed_section`.
+
+Imported rules without `applyTo` can render as description-triggered on Cursor
+but unconditional on other harnesses. A manual rule imported with `applyTo: "**"`
+stays always-on everywhere; the plan lists these activation changes before you
+consent. `apm install --target <harness>` renders the imported package for that
+harness; portability is import-and-render, not byte-identical behaviour on
+every target.

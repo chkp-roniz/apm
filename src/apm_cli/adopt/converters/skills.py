@@ -13,22 +13,30 @@ from ..model import Finding
 from . import ConvertContext, ConvertError, ConvertResult
 from .base import emit_markdown, read_markdown, refuse_credentials
 
-_TEXT_SUFFIXES = frozenset(
-    {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".sh", ".py", ".js", ".ts", ".env"}
-)
 _REFUSED_SKILL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".crt", ".netrc"})
 _REFUSED_SKILL_NAMES = frozenset({"id_rsa", "id_ed25519", "id_ecdsa", "credentials", "secrets"})
+_SCAN_SAMPLE_BYTES = 8192
 
 
-def _scan_skill_file(path: Path) -> None:
+def _scan_skill_file(path: Path, *, max_bytes: int) -> None:
     name_lower = path.name.lower()
     if name_lower in _REFUSED_SKILL_NAMES or path.suffix.lower() in _REFUSED_SKILL_SUFFIXES:
         raise ConvertError(f"{path.name}: credential file refused")
-    if path.suffix not in _TEXT_SUFFIXES and path.suffix != "":
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ConvertError(f"{path.name}: unreadable ({type(exc).__name__})") from None
+    if size > max_bytes:
+        raise ConvertError(f"{path.name}: exceeds the per-file size limit")
+    with path.open("rb") as handle:
+        sample = handle.read(min(size, _SCAN_SAMPLE_BYTES))
+    if b"\x00" in sample:
         return
-    data = path.read_text(encoding="utf-8", errors="ignore")
-    if "\x00" in data[:8192]:
-        return
+    data = sample.decode("utf-8", errors="ignore")
+    if size > _SCAN_SAMPLE_BYTES:
+        with path.open("rb") as handle:
+            handle.seek(_SCAN_SAMPLE_BYTES)
+            data += handle.read(size - _SCAN_SAMPLE_BYTES).decode("utf-8", errors="ignore")
     try:
         refuse_credentials(data)
     except ConvertError as exc:
@@ -65,9 +73,10 @@ class SkillDirConverter:
         if total > ctx.limits.max_file_bytes * 10:
             raise ConvertError("skill directory exceeds the size limit")
         result = ConvertResult()
+        per_file_limit = ctx.limits.max_file_bytes
         for skill_file in source.rglob("*"):
             if skill_file.is_file() and not skill_file.is_symlink():
-                _scan_skill_file(skill_file)
+                _scan_skill_file(skill_file, max_bytes=per_file_limit)
         meta, body = read_markdown(skill_md, ctx.limits.max_file_bytes, result)
         expected = dest.name
         ok, _reason = validate_skill_name(expected)
