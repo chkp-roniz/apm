@@ -81,6 +81,23 @@ def _stdin_is_tty() -> bool:
         return False
 
 
+def _confirm_apply(prompt: str, *, machine: bool) -> bool:
+    """Return whether the user approved the apply prompt.
+
+    JSON/YAML apply reads stdin directly so machine stdout stays a single
+    JSON/YAML document. ``click.confirm`` echoes the response to stdout under
+    Click's test runner, which breaks ``json.loads(result.stdout)``.
+    """
+    if not machine:
+        return click.confirm(prompt, default=False, err=True)
+    click.echo(f"{prompt} [y/N]: ", err=True, nl=False)
+    try:
+        answer = sys.stdin.readline()
+    except (KeyboardInterrupt, EOFError):
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _backup_destination(target: Path, backup_root: Path) -> Path:
     """Copy *target* into *backup_root* so a failed import can restore it."""
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -715,7 +732,7 @@ def run_write(
                     f"Apply {len(importable)} change(s), leave out {len(failures)} failed, "
                     f"and update {manifest.name}?"
                 )
-            if not click.confirm(prompt, default=False, err=True):
+            if not _confirm_apply(prompt, machine=(fmt != "text")):
                 if fmt != "text":
                     _emit_machine_write_report(
                         report,
