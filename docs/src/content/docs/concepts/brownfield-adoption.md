@@ -48,8 +48,8 @@ finding cap is not a bound on all filesystem traversal.
 Converters report `preserved`, `transformed`, `defaulted`, `dropped`, and
 `redacted` fields with reasons.
 
-Native hook import is optional under the [OpenAPM import rules](../../specs/openapm-v0.1/#req-pr-008).
-APM's implementation profile for [native hook import](../../specs/openapm-v0.1/#req-pr-009)
+Native hook import is optional under the [OpenAPM import rules](../../specs/openapm-v01/#req-pr-008).
+APM's implementation profile for [native hook import](../../specs/openapm-v01/#req-pr-009)
 is the reader in `src/apm_cli/integration/hook_native_formats.py`
 (`read_native_hook_document` and `canonical_hook_event`). It accepts only the
 merged hook documents listed above, with Gemini timeouts converted from
