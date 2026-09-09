@@ -8,13 +8,44 @@ from pathlib import Path
 import pytest
 
 from apm_cli.adopt import discover, scan_targets
-from apm_cli.adopt.classify import classification_rows, classify
+from apm_cli.adopt.classify import classification_rows, classify, proposed_destination
 from apm_cli.adopt.model import HarnessKind, Importability, Ownership, RawFinding, Scope
 from apm_cli.adopt.ownership import OwnershipIndex
 from apm_cli.adopt.registry import ScanRule
 from apm_cli.adopt.scanners.profile_files import derive_rules, rules_for_targets
 
 pytestmark = pytest.mark.component
+
+
+@pytest.mark.parametrize(
+    ("kind", "display_path", "expected"),
+    [
+        (
+            HarnessKind.COMMAND,
+            ".claude/commands/frontend/deploy.md",
+            "prompts/frontend-deploy.prompt.md",
+        ),
+        (
+            HarnessKind.RULE,
+            ".claude/rules/Style Guide.md",
+            "instructions/style-guide.instructions.md",
+        ),
+        (HarnessKind.AGENT, "~/.claude/agents/team/review.md", "agents/team-review.agent.md"),
+        (HarnessKind.SKILL, ".claude/skills/My_Skill", "skills/my-skill/SKILL.md"),
+        (
+            HarnessKind.ROOT_CONTEXT,
+            "src/team/sub/CLAUDE.md",
+            "instructions/sub-claude-root.instructions.md",
+        ),
+        (HarnessKind.HOOK, ".claude/hooks/check.json", "hooks/claude-check-native.json"),
+    ],
+)
+def test_preview_destination_uses_apply_naming(
+    kind: HarnessKind, display_path: str, expected: str
+) -> None:
+    """Inventory paths use the writer's normalization before collision allocation."""
+    raw = RawFinding("claude", Scope.PROJECT, kind, display_path, abs_path=Path(display_path))
+    assert proposed_destination(raw) == f".apm/{expected}"
 
 
 def test_every_static_target_primitive_yields_a_rule():

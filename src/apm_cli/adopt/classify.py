@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
 
 from apm_cli.integration.targets import RULE_FORMATS
 
@@ -69,41 +68,19 @@ def classification_rows() -> dict[tuple[str, HarnessKind], ClassRule]:
     return dict(_TABLE)
 
 
-_DEST_SUBDIR: dict[HarnessKind, tuple[str, str]] = {
-    HarnessKind.INSTRUCTION: ("instructions", ".instructions.md"),
-    HarnessKind.RULE: ("instructions", ".instructions.md"),
-    HarnessKind.ROOT_CONTEXT: ("instructions", ".instructions.md"),
-    HarnessKind.AGENT: ("agents", ".agent.md"),
-    HarnessKind.PROMPT: ("prompts", ".prompt.md"),
-    HarnessKind.COMMAND: ("prompts", ".prompt.md"),
-    HarnessKind.SKILL: ("skills", ""),
-    HarnessKind.HOOK: ("hooks", ".json"),
-}
-
-
-def _stem(raw: RawFinding) -> str:
-    name = PurePosixPath(raw.display_path).name
-    for suffix in (".instructions.md", ".agent.md", ".prompt.md", ".mdc", ".toml", ".json", ".md"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
-
-
 def proposed_destination(raw: RawFinding) -> str | None:
     """Return the ``.apm/`` path a convertible finding would land at (pre-collision)."""
+    from .converters.base import destination_parts
+
     if raw.kind is HarnessKind.MCP_SERVER:
         return "apm.yml#dependencies.mcp"
-    if raw.kind is HarnessKind.ROOT_CONTEXT:
-        return f".apm/instructions/{raw.tool}-root.instructions.md"
-    entry = _DEST_SUBDIR.get(raw.kind)
+    entry = destination_parts(raw)
     if entry is None:
         return None
-    subdir, suffix = entry
+    subdir, stem, suffix = entry
     if raw.kind is HarnessKind.SKILL:
-        return f".apm/skills/{PurePosixPath(raw.display_path).name}/SKILL.md"
-    if raw.kind is HarnessKind.HOOK:
-        return f".apm/hooks/{raw.tool}-native.json"
-    return f".apm/{subdir}/{_stem(raw)}{suffix}"
+        return f".apm/{subdir}/{stem}/SKILL.md"
+    return f".apm/{subdir}/{stem}{suffix}"
 
 
 def classify(raw: RawFinding, ownership: Ownership, evidence: tuple[str, ...] = ()) -> Finding:

@@ -28,6 +28,29 @@ from tests.unit.adopt.conftest import FAKE_TOKEN
 pytestmark = pytest.mark.component
 
 
+def test_nested_command_preview_matches_applied_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only discovery and apply name the same nested command destination."""
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / ".claude/commands/frontend/deploy.md"
+    source.parent.mkdir(parents=True)
+    original = "---\ndescription: Deploy frontend\n---\nDeploy the frontend.\n"
+    source.write_text(original, encoding="utf-8")
+    runner = CliRunner()
+    preview = runner.invoke(cli, ["init", "--discover", "--format", "json"])
+    assert preview.exit_code == 0, preview.output
+    payload = json.loads(preview.stdout)
+    command = next(f for f in payload["findings"] if f["kind"] == "command")
+    expected = ".apm/prompts/frontend-deploy.prompt.md"
+    assert command["proposed_target"] == expected
+    assert not (tmp_path / ".apm").exists()
+    applied = runner.invoke(cli, ["init", "--discover", "--apply", "--yes", "--format", "json"])
+    assert applied.exit_code == 0, applied.output
+    assert (tmp_path / expected).is_file()
+    assert source.read_text(encoding="utf-8") == original
+
+
 def _snapshot(root: Path) -> dict[str, bytes]:
     return {
         p.relative_to(root).as_posix(): p.read_bytes()

@@ -74,6 +74,9 @@ apm install --target cursor           # render supported imported content
 The inventory includes tool, scope, kind, path, importability, ownership, risk,
 and proposed destination. `apm-native` and `convertible` are candidates;
 preparation may still refuse an item or classify it reference-only.
+Proposed destinations use apply's nested-path flattening and name normalization,
+before collision suffixes or an existing import's recorded destination are applied.
+The consent plan shows the final destinations.
 See the [support matrix](../../../concepts/brownfield-adoption/#supported-conversions)
 for agent, hook, and MCP exclusions, credential screening, and activation limits.
 

@@ -9,16 +9,29 @@ from typing import Any
 
 import yaml
 
+from apm_cli.integration.skill_integrator import normalize_skill_name
 from apm_cli.integration.skill_transformer import to_hyphen_case
 from apm_cli.utils.atomic_io import write_text_lf
 from apm_cli.utils.content_hash import compute_file_hash
 from apm_cli.utils.path_security import ensure_path_within, validate_path_segments
 from apm_cli.utils.yaml_io import loads_frontmatter, yaml_to_str
 
+from ..model import Finding, HarnessKind, RawFinding
 from ..redact import contains_credential
 from . import ConvertError
 
 _MAX_DESCRIPTION = 200
+_SUFFIXES = {
+    HarnessKind.INSTRUCTION: (
+        "instructions",
+        ".instructions.md",
+        (".instructions.md", ".md", ".mdc"),
+    ),
+    HarnessKind.RULE: ("instructions", ".instructions.md", (".instructions.md", ".md", ".mdc")),
+    HarnessKind.AGENT: ("agents", ".agent.md", (".agent.md", ".md", ".toml")),
+    HarnessKind.PROMPT: ("prompts", ".prompt.md", (".prompt.md", ".md")),
+    HarnessKind.COMMAND: ("prompts", ".prompt.md", (".prompt.md", ".md", ".toml")),
+}
 
 
 def read_text(path: Path, limit: int) -> str:
@@ -160,6 +173,34 @@ def flatten_relative(rel: PurePosixPath, strip_suffixes: Iterable[str]) -> tuple
             break
     parts = [*rel.parts[:-1], name]
     return kebab("-".join(parts)), len(rel.parts) > 1
+
+
+def destination_parts(finding: Finding | RawFinding) -> tuple[str, str, str] | None:
+    """Return the shared subdirectory, normalized stem and suffix before collisions."""
+    path = PurePosixPath(finding.display_path.removeprefix("~/"))
+    # Drop the harness root and primitive subdir, preserving the writer's naming.
+    source_rel = PurePosixPath(*path.parts[2:]) if len(path.parts) > 2 else PurePosixPath(path.name)
+    if finding.kind is HarnessKind.ROOT_CONTEXT:
+        nested = source_rel.parent if "/" in finding.display_path else PurePosixPath()
+        stem = (
+            f"{finding.tool}-root"
+            if str(nested) in ("", ".")
+            else f"{nested.as_posix()}-{finding.tool}-root"
+        )
+        return "instructions", kebab(stem), ".instructions.md"
+    if finding.kind is HarnessKind.SKILL:
+        return "skills", kebab(normalize_skill_name(path.name)), ""
+    if finding.kind is HarnessKind.HOOK:
+        stem = f"{finding.tool}-native"
+        if finding.payload is None and finding.abs_path is not None:
+            stem = f"{finding.tool}-{path.stem}-native"
+        return "hooks", kebab(stem), ".json"
+    entry = _SUFFIXES.get(finding.kind)
+    if entry is None:
+        return None
+    subdir, suffix, strip = entry
+    stem, _nested = flatten_relative(source_rel, strip)
+    return subdir, stem, suffix
 
 
 def split_tools(value: Any) -> list[str] | None:

@@ -3,11 +3,12 @@
   "owners": [
     {
       "id": "import-provenance-integrity",
-      "decision": "Importer durable source identity, destination reservations, auxiliary output ownership and bounded full local-edit fingerprints (not normalized package or deployment hashes)",
-      "owner": "adopt/provenance.py (ImportSources, source_identity, hash_source, admitted_entries); adopt/materialize.py delegates",
+      "decision": "Importer durable source identity, candidate destination naming and reservations, auxiliary output ownership and bounded full local-edit fingerprints (not normalized package or deployment hashes)",
+      "owner": "adopt/provenance.py (ImportSources, source_identity, hash_source, admitted_entries); adopt/converters/base.py (destination_parts, NameAllocator); adopt/classify.py and adopt/materialize.py delegate",
       "selectors": [
         "src/apm_cli/adopt/provenance.py",
-        "src/apm_cli/adopt/materialize.py"
+        "src/apm_cli/adopt/materialize.py",
+        "src/apm_cli/adopt/converters/base.py"
       ],
       "guards": ["contracts-tooling-import-provenance"]
     },

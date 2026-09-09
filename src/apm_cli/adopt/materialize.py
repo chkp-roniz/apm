@@ -21,7 +21,6 @@ from apm_cli.core.errors import TargetResolutionError
 from apm_cli.core.scope import USER_APM_DIR
 from apm_cli.core.target_detection import manifest_targets_from_target_option
 from apm_cli.hook_contract import HookContractError, parse_hook_source
-from apm_cli.integration.skill_integrator import normalize_skill_name
 from apm_cli.primitives.parser import parse_primitive_file, parse_skill_file
 from apm_cli.utils.path_security import ensure_path_within, safe_rmtree
 
@@ -32,7 +31,7 @@ from .converters import (
     ConvertResult,
     register_builtin_converters,
 )
-from .converters.base import NameAllocator, flatten_relative
+from .converters.base import NameAllocator, destination_parts
 from .manifest_edit import apply_manifest_delta
 from .model import AdoptionReport, Finding, HarnessKind, Importability, Ownership, Scope
 from .provenance import ImportSources, hash_source, source_identity
@@ -41,17 +40,6 @@ from .render import log_plan as _log_plan
 from .render import render
 from .safety import approved_path
 
-_SUFFIXES = {
-    HarnessKind.INSTRUCTION: (
-        "instructions",
-        ".instructions.md",
-        (".instructions.md", ".md", ".mdc"),
-    ),
-    HarnessKind.RULE: ("instructions", ".instructions.md", (".instructions.md", ".md", ".mdc")),
-    HarnessKind.AGENT: ("agents", ".agent.md", (".agent.md", ".md", ".toml")),
-    HarnessKind.PROMPT: ("prompts", ".prompt.md", (".prompt.md", ".md")),
-    HarnessKind.COMMAND: ("prompts", ".prompt.md", (".prompt.md", ".md", ".toml")),
-}
 _DEFAULT_MCP_TOOL_ORDER: tuple[str, ...] = (
     "claude",
     "copilot",
@@ -156,13 +144,6 @@ class WritePlan:
         return [i for i in self.items if i.decision in ("write", "refresh")]
 
 
-def _source_rel(finding: Finding) -> PurePosixPath:
-    path = PurePosixPath(finding.display_path.removeprefix("~/"))
-    parts = list(path.parts)
-    # Drop the harness root and primitive subdir so nested names flatten below them.
-    return PurePosixPath(*parts[2:]) if len(parts) > 2 else PurePosixPath(path.name)
-
-
 def plan_write(
     report: AdoptionReport, apm_dir: Path, provenance: ImportSources, allocator: NameAllocator
 ) -> WritePlan:
@@ -224,27 +205,10 @@ def plan_write(
 
 
 def _destination(finding: Finding, allocator: NameAllocator) -> tuple[str, bool]:
-    if finding.kind is HarnessKind.ROOT_CONTEXT:
-        nested = _source_rel(finding).parent if "/" in finding.display_path else PurePosixPath()
-        stem = (
-            f"{finding.tool}-root"
-            if str(nested) in ("", ".")
-            else f"{nested.as_posix()}-{finding.tool}-root"
-        )
-        return allocator.allocate("instructions", stem, ".instructions.md", finding.tool)
-    if finding.kind is HarnessKind.SKILL:
-        folder = normalize_skill_name(PurePosixPath(finding.display_path).name)
-        return allocator.allocate("skills", folder, "", finding.tool)
-    if finding.kind is HarnessKind.HOOK:
-        stem = f"{finding.tool}-native"
-        if finding.payload is None and finding.abs_path is not None:
-            stem = f"{finding.tool}-{PurePosixPath(finding.display_path).stem}-native"
-        return allocator.allocate("hooks", stem, ".json", finding.tool)
-    entry = _SUFFIXES.get(finding.kind)
+    entry = destination_parts(finding)
     if entry is None:
         raise ConvertError(f"no destination rule for {finding.kind.value}")
-    subdir, suffix, strip = entry
-    stem, _nested = flatten_relative(_source_rel(finding), strip)
+    subdir, stem, suffix = entry
     return allocator.allocate(subdir, stem, suffix, finding.tool)
 
 

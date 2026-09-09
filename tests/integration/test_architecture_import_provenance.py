@@ -23,10 +23,19 @@ OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
 RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
+CLASSIFY = "src/apm_cli/adopt/classify.py"
 ROOT_CONTEXT = "src/apm_cli/adopt/converters/root_context.py"
 RULE_CONVERTER = "src/apm_cli/adopt/converters/rules.py"
 COMMAND_CONVERTER = "src/apm_cli/adopt/converters/commands.py"
-IMPORT_PATHS = (OWNER, MATERIALIZE, ALLOCATOR, ROOT_CONTEXT, RULE_CONVERTER, COMMAND_CONVERTER)
+IMPORT_PATHS = (
+    OWNER,
+    MATERIALIZE,
+    ALLOCATOR,
+    CLASSIFY,
+    ROOT_CONTEXT,
+    RULE_CONVERTER,
+    COMMAND_CONVERTER,
+)
 GUARD = "scripts/architecture_linter/checks/contracts_import_provenance.py"
 BEHAVIOR = "tests/unit/adopt/test_import_provenance.py"
 PERFORMANCE = "tests/unit/adopt/test_provenance_performance.py"
@@ -131,6 +140,18 @@ def test_import_output_owner_mutations_on_disk(
 @pytest.mark.parametrize(
     ("path", "old", "new"),
     [
+        pytest.param(
+            CLASSIFY,
+            "entry = destination_parts(raw)",
+            'entry = ("prompts", "deploy", ".prompt.md")',
+            id="preview-destination-owner",
+        ),
+        pytest.param(
+            MATERIALIZE,
+            "entry = destination_parts(finding)",
+            'entry = ("prompts", "deploy", ".prompt.md")',
+            id="apply-destination-owner",
+        ),
         pytest.param(
             MATERIALIZE,
             "dest_rel = provenance.destination(finding, report.findings, converter=converter.id)",

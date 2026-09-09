@@ -15,6 +15,7 @@ OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
 RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
+CLASSIFY = "src/apm_cli/adopt/classify.py"
 ROOT_CONTEXT = "src/apm_cli/adopt/converters/root_context.py"
 RULE_CONVERTER = "src/apm_cli/adopt/converters/rules.py"
 COMMAND_CONVERTER = "src/apm_cli/adopt/converters/commands.py"
@@ -52,7 +53,15 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     """Require reservations, identity, output sets and hashes at their one owner."""
     facts: dict[str, FileFacts] = {}
     findings: list[Violation] = []
-    for path in (OWNER, MATERIALIZE, ALLOCATOR, ROOT_CONTEXT, RULE_CONVERTER, COMMAND_CONVERTER):
+    for path in (
+        OWNER,
+        MATERIALIZE,
+        ALLOCATOR,
+        CLASSIFY,
+        ROOT_CONTEXT,
+        RULE_CONVERTER,
+        COMMAND_CONVERTER,
+    ):
         facts[path], failures = checked_facts(provider, path, RULE_ID, require_python=True)
         findings.extend(failures)
     if findings:
@@ -61,6 +70,31 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     def require(condition: bool, path: str, message: str) -> None:
         if not condition:
             findings.append(violation(RULE_ID, path, message))
+
+    for path, function, argument in (
+        (CLASSIFY, "proposed_destination", "raw"),
+        (MATERIALIZE, "_destination", "finding"),
+    ):
+        nodes = _scope(facts[path], function)
+        bindings = (
+            tuple(node for node in nodes if isinstance(node, ast.ImportFrom))
+            if path == CLASSIFY
+            else binding_nodes(facts[path].tree_index, "destination_parts")
+        )
+        require(
+            _assigned_call(nodes, "entry", "destination_parts", (argument,))
+            and any(
+                isinstance(node, ast.ImportFrom)
+                and (node.level, node.module) == (1, "converters.base")
+                and any(
+                    alias.name == "destination_parts" and alias.asname is None
+                    for alias in node.names
+                )
+                for node in bindings
+            ),
+            path,
+            "Inventory and apply destinations must delegate to converters.base.destination_parts",
+        )
 
     # Import identity's display spelling must not become USER activation. Keep
     # the decision at the existing semantic Scope and all-file scope owners.
