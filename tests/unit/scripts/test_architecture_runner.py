@@ -607,6 +607,8 @@ contracts-tooling-cached-policy-shape
 contracts-tooling-dependency-identity
 contracts-tooling-frontmatter-yaml
 contracts-tooling-generation-footer
+contracts-tooling-import-output
+contracts-tooling-import-provenance
 contracts-tooling-lockfile-read
 contracts-tooling-lockfile-timestamp
 contracts-tooling-lockfile-timestamp-constructor
@@ -689,6 +691,7 @@ mutation_writes.mcp_declaration_scope
 mutation_writes.mcp_package_launcher
 mutation_writes.mcp_passthrough_denylist
 mutation_writes.mcp_target_selection
+mutation_writes.native_agent_compatibility
 mutation_writes.neutral_hook_contract
 mutation_writes.user_root_scope
 contracts-tooling-root-context-write-eligibility
