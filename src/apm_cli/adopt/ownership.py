@@ -45,6 +45,10 @@ class OwnershipIndex:
     managed_files: frozenset[str] = frozenset()
     file_hashes: dict[str, str] = field(default_factory=dict)
     mcp_owned: frozenset[str] = frozenset()
+    mcp_server_names: frozenset[str] = frozenset()
+    mcp_stored_configs: dict[str, dict] = field(default_factory=dict)
+    mcp_target_servers: dict[str, frozenset[str]] = field(default_factory=dict)
+    mcp_target_servers_present: bool = False
     source_stems: frozenset[str] = frozenset()
     import_sources: frozenset[str] = frozenset()
     lockfile_present: bool = False
@@ -77,6 +81,14 @@ class OwnershipIndex:
         index.managed_files = frozenset(normalized)
         index.file_hashes = {k.replace("\\", "/"): v for k, v in hashes.items()}
         index.mcp_owned = frozenset(lockfile.mcp_configs) | frozenset(lockfile.mcp_servers)
+        index.mcp_server_names = frozenset(lockfile.mcp_servers)
+        index.mcp_stored_configs = dict(lockfile.mcp_configs)
+        index.mcp_target_servers = {
+            target: frozenset(servers) for target, servers in lockfile.mcp_target_servers.items()
+        }
+        index.mcp_target_servers_present = getattr(
+            lockfile, "_mcp_target_servers_present", bool(lockfile.mcp_target_servers)
+        )
         index.lockfile_present = True
         return index
 
@@ -128,8 +140,21 @@ class OwnershipIndex:
             return raw.ownership, ()
         if raw.kind is HarnessKind.MCP_SERVER:
             name = (raw.payload or {}).get("name") if isinstance(raw.payload, dict) else None
-            if name and name in self.mcp_owned:
-                return Ownership.APM_OWNED, ("lockfile:mcp_configs",)
+            if name and self.lockfile_present:
+                from apm_cli.install.mcp.ownership import resolve_mcp_target_servers
+
+                target_servers = resolve_mcp_target_servers(
+                    recorded_target_servers={
+                        target: set(servers) for target, servers in self.mcp_target_servers.items()
+                    },
+                    ownership_present=self.mcp_target_servers_present,
+                    server_names=set(self.mcp_server_names),
+                    stored_configs=self.mcp_stored_configs,
+                    project_root=self.root if self.scope is Scope.PROJECT else None,
+                    user_scope=self.scope is Scope.USER,
+                )
+                if name in target_servers.get(raw.tool, set()):
+                    return Ownership.APM_OWNED, ("lockfile:mcp_target_servers",)
             return Ownership.HOST_OWNED, ()
         if raw.abs_path is None:
             return Ownership.HOST_OWNED, ()

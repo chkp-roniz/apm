@@ -171,14 +171,13 @@ def _skipped(rel: PurePosixPath) -> bool:
 
 
 def _resolve_within(ctx: ScanContext, path: Path) -> Path | None:
-    """Resolve *path*, rejecting symlinks that escape the scan root."""
-    if not path.is_symlink():
-        return path
-    resolved = path.resolve(strict=False)
+    """Resolve *path* and reject anything that escapes the scan root."""
     try:
-        ensure_path_within(resolved, ctx.root)
+        resolved = path.resolve(strict=False)
+        ensure_path_within(resolved, ctx.root.resolve(strict=False))
     except PathTraversalError:
-        ctx.error(path, "symlink escapes scan root")
+        reason = "symlink escapes scan root" if path.is_symlink() else "path escapes scan root"
+        ctx.error(path, reason)
         return None
     return resolved
 

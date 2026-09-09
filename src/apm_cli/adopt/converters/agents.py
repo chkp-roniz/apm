@@ -57,6 +57,10 @@ class AgentsConverter:
                 continue
             value = meta[key]
             if key == "tools":
+                if fmt == "opencode_agent" and isinstance(value, dict):
+                    out[key] = dict(value)
+                    result.keep("frontmatter.tools")
+                    continue
                 tools = split_tools(value)
                 if tools is None:
                     result.drop("frontmatter.tools", "unrecognised tools shape")
