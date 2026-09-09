@@ -86,14 +86,18 @@ def lenient_frontmatter(text: str) -> tuple[dict[str, Any], str] | None:
 
 
 def read_markdown(path: Path, limit: int, result: Any | None = None) -> tuple[dict[str, Any], str]:
-    """Return (frontmatter, body) for a markdown source.
+    """Read a bounded markdown source and return its frontmatter and body."""
+    return parse_markdown(read_text(path, limit), result)
+
+
+def parse_markdown(text: str, result: Any | None = None) -> tuple[dict[str, Any], str]:
+    """Return (frontmatter, body) for already-read markdown text.
 
     Uses the bounded YAML loader; when the frontmatter is not valid YAML (a
     common Claude Code idiom: unquoted descriptions with colons), fall back
     to the lenient line parser and record a ``transformed`` change on
     *result* when given.
     """
-    text = read_text(path, limit)
     try:
         post = loads_frontmatter(text, preserve_body=True)
     except yaml.YAMLError as exc:

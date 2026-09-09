@@ -402,6 +402,38 @@ MUTATIONS: tuple[CompoundMutation, ...] = (
         ),
     ),
     CompoundMutation(
+        "contraction-post-local-project-only-gate",
+        CONTRACTION_RULE,
+        "src/apm_cli/install/phases/post_deps_local.py",
+        _replace(
+            "    # Skip if there is no local content (current or previous).\n",
+            "    from apm_cli.core.scope import InstallScope\n"
+            "    if ctx.scope is not InstallScope.PROJECT:\n"
+            "        return\n",
+        ),
+    ),
+    CompoundMutation(
+        "contraction-post-local-user-selector-gate",
+        CONTRACTION_RULE,
+        "src/apm_cli/install/phases/post_deps_local.py",
+        _replace(
+            "    # Skip if there is no local content (current or previous).\n",
+            "    if is_user_scope(ctx.scope):\n        return\n",
+        ),
+    ),
+    CompoundMutation(
+        "contraction-post-local-hardcoded-scope",
+        CONTRACTION_RULE,
+        "src/apm_cli/install/phases/post_deps_local.py",
+        _replace("user_scope=is_user_scope(ctx.scope),", "user_scope=False,"),
+    ),
+    CompoundMutation(
+        "contraction-post-local-missing-scope",
+        CONTRACTION_RULE,
+        "src/apm_cli/install/phases/post_deps_local.py",
+        _replace("        user_scope=is_user_scope(ctx.scope),\n", ""),
+    ),
+    CompoundMutation(
         "contraction-uninstall-route",
         CONTRACTION_RULE,
         "src/apm_cli/commands/uninstall/cli.py",

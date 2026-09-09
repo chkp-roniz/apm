@@ -34,9 +34,6 @@ _TABLE: dict[tuple[str, HarnessKind], ClassRule] = {
     (ANY, HarnessKind.HOOK): ClassRule(
         Importability.CONVERTIBLE, "{format}->apm_hooks", frozenset({Risk.EXECUTES_CODE})
     ),
-    ("copilot", HarnessKind.HOOK): ClassRule(
-        Importability.APM_NATIVE, "passthrough.hook", frozenset({Risk.EXECUTES_CODE})
-    ),
     (ANY, HarnessKind.HOOK_SCRIPT): ClassRule(
         Importability.REFERENCE_ONLY,
         None,

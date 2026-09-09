@@ -16,6 +16,7 @@ from apm_cli.adopt.redact import Redactor
 from apm_cli.adopt.registry import ScanContext, ScanLimits, ScanRule, findings_for_rule
 from apm_cli.adopt.safety import approved_path
 from apm_cli.adopt.scanners.hooks import HooksScanner, _load_json, script_findings
+from apm_cli.adopt.scanners.mcp import McpScanner
 from apm_cli.adopt.scanners.plugins import PluginsScanner
 from apm_cli.adopt.scanners.profile_files import unrecognised_files
 from apm_cli.adopt.scanners.root_context import RootContextScanner
@@ -77,6 +78,34 @@ def _forbid_io(monkeypatch: pytest.MonkeyPatch, *blocked: Path) -> None:
         return scandir(path)
 
     monkeypatch.setattr(os, "scandir", guarded_scandir)
+
+
+@pytest.mark.parametrize("present", [False, True], ids=["absent", "present"])
+def test_external_user_config_is_inventory_only_without_any_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: bool
+) -> None:
+    from apm_cli.factory import ClientFactory
+
+    root = tmp_path / "home"
+    root.mkdir()
+    external = tmp_path / "external"
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(external))
+    monkeypatch.setattr(ClientFactory, "supported_clients", lambda: ["intellij"])
+    adapter = ClientFactory.create_client("intellij", project_root=root, user_scope=True)
+    path = Path(adapter.get_config_path())
+    assert path.is_relative_to(external)
+    if present:
+        write(path, '{"mcpServers":{"private":{"command":"must-not-read"}}}')
+    ctx = _context(root, Scope.USER)
+    with monkeypatch.context() as patch:
+        _forbid_io(patch, external)
+        found = list(McpScanner().scan(ctx))
+    assert ctx.errors == []
+    assert len(found) == 1 and found[0].kind is HarnessKind.UNKNOWN
+    assert found[0].abs_path is None and found[0].payload is None
+    assert "not inspected" in " ".join(found[0].notes)
 
 
 @pytest.mark.parametrize("scope", [Scope.PROJECT, Scope.USER])

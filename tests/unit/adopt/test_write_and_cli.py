@@ -121,7 +121,7 @@ def test_mcp_entry_redacts_secrets_and_keeps_placeholders():
         result,
     )
     assert entry["command"] == "npx" and entry["args"] == ["-y", "pkg"]
-    assert entry["env"]["GITHUB_TOKEN"] == "${GITHUB_TOKEN}"
+    assert entry["env"]["GITHUB_TOKEN"] == placeholder_name("github", "GITHUB_TOKEN", field="env")
     assert entry["env"]["OTHER"] == "${OTHER}"
     assert entry["env"]["MODE"] == "fast"
     assert FAKE_TOKEN not in json.dumps(entry)
@@ -165,7 +165,7 @@ def test_mcp_entry_redacts_secrets_and_keeps_placeholders():
             ConvertResult(),
         )
     assert FAKE_TOKEN not in str(token_url.value)
-    assert placeholder_name("github", "GITHUB_TOKEN") == "${GITHUB_TOKEN}"
+    assert placeholder_name("github", "GITHUB_TOKEN").startswith("${GITHUB_TOKEN_")
     assert looks_like_secret("api_key", "x") and not looks_like_secret("MODE", "fast")
 
 
@@ -276,7 +276,8 @@ def test_write_materializes_merges_and_is_idempotent(in_project: Path):
     names = {e["name"] for e in manifest["dependencies"]["mcp"]}
     assert names == {"github", "remote"}
     raw_manifest = (in_project / "apm.yml").read_text(encoding="utf-8")
-    assert FAKE_TOKEN not in raw_manifest and "${GITHUB_TOKEN}" in raw_manifest
+    assert FAKE_TOKEN not in raw_manifest
+    assert placeholder_name("github", "GITHUB_TOKEN", field="env") in raw_manifest
     assert FAKE_TOKEN not in result.output
     assert _snapshot(in_project) == before  # originals untouched
     provenance = json.loads((apm / ".import-sources.json").read_text(encoding="utf-8"))

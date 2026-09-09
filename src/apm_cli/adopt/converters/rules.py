@@ -42,7 +42,12 @@ def _cursor(meta: dict[str, Any], result: ConvertResult) -> dict[str, Any]:
     always = bool(meta.get("alwaysApply"))
     if always:
         out["applyTo"] = ALWAYS_ON
-        result.transform("frontmatter.alwaysApply", "always-on rule expressed as applyTo: '**'")
+        result.transform(
+            "frontmatter.alwaysApply",
+            "alwaysApply is not preserved: unconditional activation becomes file matching "
+            "through applyTo: '**'; inspect deployment before use",
+            "warning",
+        )
         if globs:
             result.drop("frontmatter.globs", "alwaysApply wins over globs")
     elif globs:

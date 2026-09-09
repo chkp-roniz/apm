@@ -82,11 +82,8 @@ def apply_manifest_delta(
         raise ValueError(f"{manifest_path} is not a mapping")
 
     wanted = [t for t in targets if t in manifest_target_names()]
+    current = parse_targets_field(dict(data), allow_empty_singular=False)
     if wanted:
-        try:
-            current = parse_targets_field(dict(data))
-        except Exception:  # invalid or empty targets block: rebuild it
-            current = []
         merged_targets = list(dict.fromkeys([*current, *wanted]))
         if merged_targets != current or "targets" not in data:
             if "target" in data:

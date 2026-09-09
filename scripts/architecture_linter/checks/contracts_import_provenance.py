@@ -13,6 +13,7 @@ from scripts.architecture_linter.models import FileFacts, Rule, Violation
 RULE_ID = "contracts-tooling-import-provenance"
 OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
+RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
 
 
@@ -112,27 +113,74 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
         MATERIALIZE,
         "plan_write must reserve all provenance entries before allocating any finding",
     )
+    indexed = bool(_calls(plan, "provenance.for_plan"))
+    if indexed:
+        index_assignments = [
+            node
+            for node in statements
+            if _assigned_call((node,), "ownership", "provenance.for_plan", ("report.findings",))
+        ]
+        require(
+            len(index_assignments) == len(finding_loops) == 1
+            and index_assignments[0].lineno < finding_loops[0].lineno,
+            MATERIALIZE,
+            "Attribution indices must consume real findings once before the finding loop",
+        )
+    destination_owner = "ownership" if indexed else "provenance"
     require(
-        _assigned_call(plan, "dest_rel", "provenance.destination", ("finding", "report.findings")),
+        _assigned_call(
+            plan,
+            "dest_rel",
+            f"{destination_owner}.destination",
+            ("finding",) if indexed else ("finding", "report.findings"),
+        ),
         MATERIALIZE,
-        "plan_write destinations must delegate durable source ownership to provenance.destination",
+        "plan_write destinations must delegate durable source ownership to provenance",
     )
+    decision_method = "provenance.inspect" if indexed else "provenance.decide"
     require(
-        len(_calls(plan, "provenance.decide")) == 2
+        len(_calls(plan, decision_method)) == 2
         and all(
             any(
                 kw.arg == "identity" and ast.unparse(kw.value) == "source_identity(finding)"
                 for kw in call.keywords
             )
-            for call in _calls(plan, "provenance.decide")
+            for call in _calls(plan, decision_method)
         )
         and any(
-            ast.unparse(call) == "provenance.outputs(dest_rel)"
-            for call in _calls(plan, "provenance.outputs")
+            ast.unparse(call) == f"{destination_owner}.outputs(dest_rel)"
+            for call in _calls(plan, f"{destination_owner}.outputs")
         ),
         MATERIALIZE,
         "Primary and auxiliary decisions must consume owner output sets and full source identity",
     )
+    if indexed:
+        assignments = {
+            ast.unparse(target): ast.unparse(node.value)
+            for node in plan
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+        }
+        require(
+            _assigned_call(
+                plan,
+                "witness",
+                "provenance.inspect",
+                ("dest_rel", "apm_dir / dest_rel", "source_hash"),
+            )
+            and assignments.items()
+            >= {
+                "decision": "witness.decision",
+                "output_witness": (
+                    "witness if output == dest_rel else provenance.inspect("
+                    "output, apm_dir / output, source_hash, identity=source_identity(finding))"
+                ),
+                "output_decision": "output_witness.decision",
+                "item.expected[output]": "output_witness.current_hash",
+            }.items(),
+            MATERIALIZE,
+            "Preparation must reuse the primary witness and consume each output's full hash",
+        )
 
     record_calls = [
         node
@@ -179,7 +227,14 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     )
     require(
         _assigned_call(
-            _scope(owner, "ImportSources.decide"), "current", "hash_source", ("dest_abs",)
+            _scope(owner, "ImportSources.inspect"), "current", "hash_source", ("dest_abs",)
+        )
+        and any(
+            isinstance(node, ast.Return)
+            and node.value is not None
+            and ast.unparse(node.value)
+            == "self.inspect(dest_rel, dest_abs, source_hash, identity=identity).decision"
+            for node in _scope(owner, "ImportSources.decide")
         )
         and any(
             kw.arg == "output_sha256"
@@ -196,6 +251,51 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     return tuple(findings)
 
 
+def check_import_output(provider: FactsProvider) -> tuple[Violation, ...]:
+    """Import plans use CommandLogger without resetting the canonical stream mode."""
+    rule_id = "contracts-tooling-import-output"
+    facts, failures = checked_facts(provider, RENDER, rule_id, require_python=True)
+    materialize, other_failures = checked_facts(provider, MATERIALIZE, rule_id, require_python=True)
+    failures = (*failures, *other_failures)
+    if failures:
+        return failures
+    plan = _scope(facts, "log_plan")
+    aliases = [
+        node
+        for node in plan
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and ast.unparse(node.targets[0]) == "(info, tree_item, warning, error)"
+        and ast.unparse(node.value)
+        == "(logger.info, logger.tree_item, logger.warning, logger.error)"
+    ]
+    findings = []
+    if len(aliases) != 1 or _calls(plan, "click.echo"):
+        findings.append(
+            violation(rule_id, RENDER, "Import plan diagnostics must use CommandLogger")
+        )
+    bindings = binding_nodes(materialize.tree_index, "_log_plan") if materialize.tree_index else ()
+    if any(
+        call.qualname.rsplit(".", 1)[-1] in {"_reset_console", "set_console_stderr"}
+        for call in materialize.calls
+    ) or not (
+        len(bindings) == 1
+        and isinstance(bindings[0], ast.ImportFrom)
+        and bindings[0].module == "render"
+        and any(
+            alias.name == "log_plan" and alias.asname == "_log_plan" for alias in bindings[0].names
+        )
+    ):
+        findings.append(
+            violation(
+                rule_id,
+                MATERIALIZE,
+                "Import diagnostics must use CommandLogger and preserve root output routing",
+            )
+        )
+    return tuple(findings)
+
+
 RULES = (
     Rule(
         RULE_ID,
@@ -203,5 +303,12 @@ RULES = (
         (RULE_ID,),
         "Importer source identity, reservations and full local-edit fingerprints have one owner.",
         check_import_provenance,
+    ),
+    Rule(
+        "contracts-tooling-import-output",
+        "contracts_tests",
+        ("contracts-tooling-import-output",),
+        "Import diagnostics must retain CommandLogger and root output-mode ownership.",
+        check_import_output,
     ),
 )

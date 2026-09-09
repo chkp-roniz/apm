@@ -10,11 +10,13 @@
     },
     {
       "id": "legacy-mcp-ownership-key-migration",
-      "decision": "Target-scoped MCP ownership, explicit-empty and exact legacy-baseline adoption with authorized import reads",
-      "owner": "install/mcp/ownership.py",
+      "decision": "Target-scoped MCP ownership, explicit-empty and exact legacy-baseline adoption with bounded, authorized, noninteractive import reads",
+      "owner": "install/mcp/ownership.py; adopt/registry.py (file_size admission); adapters/client/base.py (native parsing and noninteractive rendering)",
       "selectors": [
         "src/apm_cli/install/mcp/ownership.py",
-        "src/apm_cli/adopt/ownership.py"
+        "src/apm_cli/adopt/ownership.py",
+        "src/apm_cli/adopt/__init__.py",
+        "src/apm_cli/adopt/scanners/mcp.py"
       ],
       "guards": ["install-deployment-mcp-ownership-migration"]
     },
@@ -27,9 +29,12 @@
     },
     {
       "id": "target-scoped-deployed-file-contraction",
-      "decision": "Target-scoped deployed-file contraction",
+      "decision": "Target-scoped deployed-file contraction, including local persistence in project and user scopes",
       "owner": "install/manifest_reconcile.py (reconcile_target_deployed_files)",
-      "selectors": ["src/apm_cli/install/manifest_reconcile.py"],
+      "selectors": [
+        "src/apm_cli/install/manifest_reconcile.py",
+        "src/apm_cli/install/phases/post_deps_local.py"
+      ],
       "guards": ["install-deployment-target-file-contraction"]
     },
     {
@@ -149,9 +154,13 @@
     },
     {
       "id": "cross-process-lifecycle-serialization",
-      "decision": "Cross-process lifecycle mutation serialization",
+      "decision": "Cross-process lifecycle mutation serialization, including primary and alias discovery callbacks without nested helper locking",
       "owner": "install/locking.py (lifecycle_operation, serialized_lifecycle)",
-      "selectors": ["src/apm_cli/install/locking.py"],
+      "selectors": [
+        "src/apm_cli/install/locking.py",
+        "src/apm_cli/commands/init.py",
+        "src/apm_cli/commands/discover.py"
+      ],
       "guards": ["install-deployment-lifecycle-serialization"]
     },
     {

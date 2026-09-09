@@ -11,21 +11,10 @@ This page covers migrations you hit while adopting APM or upgrading the CLI. For
 
 ## 1. From hand-managed `.github/copilot-instructions.md`
 
-Your existing instruction files are not touched by APM. `apm init` is additive: it writes `apm.yml` next to whatever already exists.
-
-```bash
-apm init                          # creates apm.yml; never edits existing files
-apm install                       # resolves dependencies, writes apm.lock.yaml
-apm compile                       # materializes target-specific output
-git add apm.yml apm.lock.yaml
-git commit -m "Adopt APM"
-```
-
-[+] Hand-written `.github/copilot-instructions.md`, `AGENTS.md`, `.cursor/rules`, `.claude/` configs continue to work side-by-side with APM-managed files.
-
-[!] Do not commit `apm_modules/` -- add it to `.gitignore`. The lockfile is the reproducibility contract, not the installed tree.
-
-See [`apm init`](../../reference/cli/init/) and [`apm install`](../../reference/cli/install/) for full flag references.
+Use [existing-project onboarding](../../getting-started/migration/#import-what-you-already-have)
+to import supported instructions. Installation has separate collision rules;
+follow [selective cutover](../../concepts/brownfield-adoption/#cut-over) to
+reconcile verified duplicates while retaining unsupported content.
 
 ## 2. From `awd-cli` (previous project name)
 
@@ -176,12 +165,10 @@ See [Registries guide — pitfalls](../../guides/registries/#pitfalls) for env-v
 
 ## 7. Marketplace switchover (hand-rolled MCP -> APM-managed)
 
-If your project has a hand-edited `.mcp.json` (or VS Code `mcp.json`) declaring servers directly:
-
-1. Move each server into the `mcp:` block of `apm.yml`. APM resolves servers from the marketplace and wires them per target on install.
-2. Run `apm install`. APM rewrites the target-specific MCP config.
-3. Diff the generated MCP config against your previous hand-rolled version and reconcile any custom env vars or args using the marketplace package's documented inputs.
-4. Delete the legacy hand-rolled config once the APM-managed version is verified.
+Use [discovery onboarding](../../getting-started/migration/#import-what-you-already-have)
+for supported native MCP entries. Review [conversion limits](../../concepts/brownfield-adoption/#supported-conversions)
+and follow [selective cutover](../../concepts/brownfield-adoption/#cut-over)
+rather than deleting shared native configuration files.
 
 For publishing your own marketplace entries, see [Publish to a marketplace](../../producer/publish-to-a-marketplace/).
 

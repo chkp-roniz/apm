@@ -37,7 +37,7 @@ finding cap is not a bound on all filesystem traversal.
 |---|---|---|
 | Copilot instructions, prompts, agents | Corresponding `.apm/` primitives | Existing APM-shaped content; validation and credential screening still apply |
 | Cursor, Claude, Kiro, Windsurf, Antigravity rules | `.apm/instructions/*.instructions.md` | Native globs/paths become `applyTo`; unsupported trigger distinctions produce warnings |
-| Hand-authored root context (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) | Instructions, scoped for nested context | Generated or ambiguous files excluded; Claude `@path` imports become links or are dropped with reasons |
+| Hand-authored project context at fixed paths (`CLAUDE.md`, `.claude/CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.github/copilot-instructions.md`) | Instructions | Arbitrary nested project context files are not discovered; generated or ambiguous files excluded; Claude `@path` imports become links or are dropped with reasons |
 | Markdown agents; Codex TOML agents | `.apm/agents/*.agent.md` | Portable keys retained, vendor keys reported as dropped; OpenCode agents with native `tools` or `permission` policies, or incompatible frontmatter, are reference-only |
 | Markdown commands, Windsurf workflows, Gemini TOML commands | `.apm/prompts/*.prompt.md` | Portable keys retained; vendor fields and argument transformations reported |
 | Skill directories | `.apm/skills/<name>/` | Name normalized; symlinks refused; non-content files filtered |
@@ -131,3 +131,6 @@ avoid rewriting output; existing MCP declarations remain authoritative.
 After verified cutover, edit adopted content in `.apm/` and `apm.yml` and
 redeploy. Re-import is explicit, not ongoing synchronization. For user-scope
 onboarding, `--global` imports into `~/.apm/`; deploy with `apm install --global`.
+Global installation records local deployments and their hashes in
+`~/.apm/apm.lock.yaml`, so later discovery recognizes those files as APM-owned
+instead of importing them again.

@@ -15,10 +15,10 @@ from .base import emit_markdown, read_markdown, refuse_credentials
 
 _REFUSED_SKILL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".crt", ".netrc"})
 _REFUSED_SKILL_NAMES = frozenset({"id_rsa", "id_ed25519", "id_ecdsa", "credentials", "secrets"})
-_SCAN_SAMPLE_BYTES = 8192
 
 
 def _scan_skill_file(path: Path, *, max_bytes: int) -> None:
+    """Screen bounded asset bytes, including recognizable ASCII secrets in binaries."""
     name_lower = path.name.lower()
     if name_lower in _REFUSED_SKILL_NAMES or path.suffix.lower() in _REFUSED_SKILL_SUFFIXES:
         raise ConvertError(f"{path.name}: credential file refused")
@@ -28,17 +28,18 @@ def _scan_skill_file(path: Path, *, max_bytes: int) -> None:
         raise ConvertError(f"{path.name}: unreadable ({type(exc).__name__})") from None
     if size > max_bytes:
         raise ConvertError(f"{path.name}: exceeds the per-file size limit")
-    with path.open("rb") as handle:
-        sample = handle.read(min(size, _SCAN_SAMPLE_BYTES))
-    if b"\x00" in sample:
-        return
-    data = sample.decode("utf-8", errors="ignore")
-    if size > _SCAN_SAMPLE_BYTES:
-        with path.open("rb") as handle:
-            handle.seek(_SCAN_SAMPLE_BYTES)
-            data += handle.read(size - _SCAN_SAMPLE_BYTES).decode("utf-8", errors="ignore")
     try:
-        refuse_credentials(data)
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise ConvertError(f"{path.name}: unreadable ({type(exc).__name__})") from None
+    if len(data) > max_bytes:
+        raise ConvertError(f"{path.name}: exceeds the per-file size limit")
+    try:
+        # Non-ASCII bytes are delimiters, not discarded bytes that could join
+        # unrelated fragments. This reuses the canonical high-confidence shapes
+        # without decoding/re-encoding (or refusing) otherwise safe binary assets.
+        refuse_credentials(data.decode("ascii", errors="replace"))
     except ConvertError as exc:
         raise ConvertError(f"{path.name}: {exc}") from None
 

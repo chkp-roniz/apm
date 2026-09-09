@@ -15,13 +15,14 @@ from typing import Any
 import click
 
 from apm_cli.constants import APM_YML_FILENAME
+from apm_cli.core.apm_yml import parse_targets_field
 from apm_cli.core.command_logger import CommandLogger
+from apm_cli.core.errors import TargetResolutionError
 from apm_cli.core.scope import USER_APM_DIR
 from apm_cli.core.target_detection import manifest_targets_from_target_option
 from apm_cli.hook_contract import HookContractError, parse_hook_source
 from apm_cli.integration.skill_integrator import normalize_skill_name
 from apm_cli.primitives.parser import parse_primitive_file, parse_skill_file
-from apm_cli.utils.console import STATUS_SYMBOLS
 from apm_cli.utils.path_security import ensure_path_within, safe_rmtree
 
 from .converters import (
@@ -30,13 +31,13 @@ from .converters import (
     ConvertError,
     ConvertResult,
     register_builtin_converters,
-    summarize_changes,
 )
 from .converters.base import NameAllocator, flatten_relative
 from .manifest_edit import apply_manifest_delta
 from .model import AdoptionReport, Finding, HarnessKind, Importability, Ownership, Scope
 from .provenance import ImportSources, hash_source, source_identity
 from .redact import Redactor
+from .render import log_plan as _log_plan
 from .render import render
 from .safety import approved_path
 
@@ -156,7 +157,7 @@ class WritePlan:
 
 
 def _source_rel(finding: Finding) -> PurePosixPath:
-    path = PurePosixPath(finding.display_path)
+    path = PurePosixPath(finding.display_path.removeprefix("~/"))
     parts = list(path.parts)
     # Drop the harness root and primitive subdir so nested names flatten below them.
     return PurePosixPath(*parts[2:]) if len(parts) > 2 else PurePosixPath(path.name)
@@ -168,6 +169,7 @@ def plan_write(
     """Decide destinations for every eligible finding without touching the disk."""
     plan = WritePlan(apm_dir=apm_dir)
     allocator.reserve(provenance.entries)
+    ownership = provenance.for_plan(report.findings)
     for finding in report.findings:
         if finding.importability not in (Importability.APM_NATIVE, Importability.CONVERTIBLE):
             continue
@@ -185,21 +187,27 @@ def plan_write(
             continue
         try:
             source_hash = hash_source(finding.abs_path, root=provenance.root)
-            dest_rel = provenance.destination(finding, report.findings, converter=converter.id)
+            dest_rel = ownership.destination(finding, converter=converter.id)
             if dest_rel is None:
                 dest_rel, _renamed = _destination(finding, allocator)
-            decision = provenance.decide(
+            witness = provenance.inspect(
                 dest_rel, apm_dir / dest_rel, source_hash, identity=source_identity(finding)
             )
+            decision = witness.decision
             item = WriteItem(finding, converter.id, dest_rel, decision, source_hash)
-            outputs = provenance.outputs(dest_rel) or [dest_rel]
+            outputs = ownership.outputs(dest_rel) or [dest_rel]
             for output in outputs:
-                output_decision = provenance.decide(
-                    output, apm_dir / output, source_hash, identity=source_identity(finding)
+                output_witness = (
+                    witness
+                    if output == dest_rel
+                    else provenance.inspect(
+                        output, apm_dir / output, source_hash, identity=source_identity(finding)
+                    )
                 )
+                output_decision = output_witness.decision
                 if output_decision in ("locally-modified", "collision"):
                     item.decision = output_decision
-                item.expected[output] = hash_source(apm_dir / output, root=provenance.root)
+                item.expected[output] = output_witness.current_hash
             if item.decision == "unchanged" and finding.kind is HarnessKind.HOOK:
                 item.decision = "refresh"
         except Exception as exc:
@@ -504,108 +512,8 @@ def _emit_write_report(report: AdoptionReport, fmt: str, write_section: dict[str
 def _emit_machine_write_report(
     report: AdoptionReport, fmt: str, write_section: dict[str, Any]
 ) -> None:
-    """Emit structured output on stdout after restoring the normal console."""
-    if fmt != "text":
-        from apm_cli.utils.console import _reset_console
-
-        _reset_console()
+    """Emit structured output on stdout without changing diagnostic routing."""
     _emit_write_report(report, fmt, write_section)
-
-
-def _plan_status(message: str, *, symbol: str = "info") -> None:
-    """Write one migration-plan line to stderr without the global console singleton."""
-    click.echo(f"{STATUS_SYMBOLS.get(symbol, '[i]')} {message}", err=True)
-
-
-def _log_plan(
-    plan: WritePlan,
-    to_write: list[WriteItem],
-    manifest_notes: list[str],
-    validation_problems: list[str],
-    *,
-    logger: CommandLogger,
-    apm_display: str,
-    manifest_name: str,
-    stderr_only: bool = False,
-) -> None:
-    """Log the migration plan; use *stderr_only* for JSON/YAML apply (xdist-safe)."""
-
-    def info(message: str) -> None:
-        if stderr_only:
-            _plan_status(message, symbol="info")
-        else:
-            logger.info(message)
-
-    def tree_item(message: str) -> None:
-        if stderr_only:
-            click.echo(message, err=True)
-        else:
-            logger.tree_item(message)
-
-    def warning(message: str) -> None:
-        if stderr_only:
-            _plan_status(message, symbol="warning")
-        else:
-            logger.warning(message)
-
-    def error(message: str) -> None:
-        if stderr_only:
-            _plan_status(message, symbol="error")
-        else:
-            logger.error(message)
-
-    file_items = [
-        i
-        for i in to_write
-        if i.finding.kind is not HarnessKind.MCP_SERVER
-        and i.decision in ("write", "refresh")
-        and not i.error
-    ]
-    mcp_items = [
-        i
-        for i in to_write
-        if i.finding.kind is HarnessKind.MCP_SERVER
-        and i.decision in ("write", "refresh")
-        and not i.error
-    ]
-    failures = [i for i in to_write if i.error]
-    info("Import plan")
-    if file_items:
-        info(f"Will write {len(file_items)} file(s) into {apm_display}/:")
-        for item in file_items:
-            summary = summarize_changes(item.result.changes) if item.result else ""
-            tree_item(
-                f"{item.finding.display_path} -> {item.dest_rel} ({item.decision}) [{summary}]"
-            )
-            for change in item.result.changes if item.result else ():
-                if change.severity == "warning":
-                    tree_item(f"    {change.path}: {change.reason}")
-    if mcp_items:
-        info(f"Will add {len(mcp_items)} MCP server(s) to {manifest_name}:")
-        for item in mcp_items:
-            tree_item(item.finding.display_path)
-            for change in item.result.changes if item.result else ():
-                if change.severity == "warning":
-                    tree_item(f"    {change.path}: {change.reason}")
-    if manifest_notes:
-        info(f"{manifest_name} changes:")
-        for note in manifest_notes:
-            tree_item(note)
-    unchanged = [i for i in plan.items if i.decision not in ("write", "refresh")]
-    if unchanged or plan.skipped:
-        info("Not written:")
-        for item in unchanged:
-            tree_item(f"{item.finding.display_path}: {item.decision}")
-        for finding, reason in plan.skipped:
-            tree_item(f"{finding.display_path}: {reason}")
-    if failures:
-        warning(f"{len(failures)} item(s) cannot be imported and will be left out:")
-        for item in failures:
-            tree_item(f"{item.finding.display_path}: {item.error}")
-    if validation_problems:
-        error("Staged files failed validation; nothing can be written:")
-        for problem in validation_problems[:20]:
-            tree_item(problem)
 
 
 def _describe_plan(
@@ -678,6 +586,7 @@ def _mcp_plan(
     data = load_yaml_roundtrip(manifest) if manifest.exists() else {}
     if not isinstance(data, Mapping):
         raise ValueError("manifest is not a mapping")
+    parse_targets_field(dict(data), allow_empty_singular=False)
     dependencies = data.get("dependencies") or {}
     if not isinstance(dependencies, Mapping):
         raise ValueError("manifest dependencies is not a mapping")
@@ -776,6 +685,8 @@ def run_write(
     status = "failed"
     recovery = "not-needed"
     failure_reason: str | None = None
+    committed_mcp = 0
+    manifest_committed = False
     commit_txn = _CommitTxn()
     problems: list[str] = []
 
@@ -813,6 +724,16 @@ def run_write(
         provenance_before = provenance.path.read_bytes() if provenance.path.is_file() else None
         _mcp_plan([], manifest, ctx.preferred_tools)
         if not plan.to_write:
+            _log_plan(
+                plan,
+                plan.items,
+                [],
+                [],
+                logger=logger,
+                apm_display=apm_display,
+                manifest_name=manifest.name,
+                scan_errors=report.errors,
+            )
             status = "partial" if incomplete() else "complete"
             return 1 if incomplete() else 0
         staging_root = Path(tempfile.mkdtemp(prefix=".apm-adopt-", dir=root))
@@ -850,7 +771,7 @@ def run_write(
             logger=logger,
             apm_display=apm_display,
             manifest_name=manifest.name,
-            stderr_only=fmt != "text",
+            scan_errors=report.errors,
         )
         if problems:
             return 1
@@ -919,6 +840,10 @@ def run_write(
                         )
             if written:
                 provenance.save()
+            committed_mcp = len(mcp_entries)
+            manifest_committed = (
+                manifest.read_bytes() if manifest.is_file() else None
+            ) != manifest_before
         except Exception as exc:
             failure_reason = f"import commit failed ({type(exc).__name__})"
             try:
@@ -938,6 +863,9 @@ def run_write(
             return 1
         status = "partial" if incomplete() else "complete"
         return 1 if incomplete() else 0
+    except TargetResolutionError:
+        failure_reason = "invalid manifest targets; correct the targets/target field and retry"
+        return 1
     except Exception as exc:
         failure_reason = (
             f"import preparation failed ({type(exc).__name__}); review configuration and retry"
@@ -952,7 +880,10 @@ def run_write(
             except Exception:
                 cleanup_failed = True
                 status = "failed"
-                failure_reason = "import staging cleanup failed; inspect contained recovery files"
+                failure_reason = (
+                    "import staging cleanup failed; inspect contained recovery files in "
+                    f"{staging_root.name}/"
+                )
         if fmt != "text":
             section = _build_write_dict(
                 status=status,
@@ -964,6 +895,8 @@ def run_write(
                 validation_problems=problems,
             )
             section["recovery"] = recovery
+            section["mcp_imported"] = committed_mcp
+            section["manifest_updated"] = manifest_committed
             if failure_reason:
                 section["reason"] = failure_reason
             _emit_machine_write_report(report, fmt, section)
@@ -974,9 +907,28 @@ def run_write(
         elif status == "cancelled":
             logger.info("Cancelled; nothing written.")
         elif status == "complete":
-            logger.success(f"Wrote {len(written)} file(s) into {apm_display}/")
             if written:
+                logger.success(f"Wrote {len(written)} file(s) into {apm_display}/")
+            if committed_mcp:
+                logger.success(f"Imported {committed_mcp} MCP server(s) into {manifest.name}")
+            elif manifest_committed:
+                logger.success(f"Updated {manifest.name}")
+            if not written and not manifest_committed:
+                logger.info("No changes; existing outputs were retained.")
+            if written or manifest_committed:
                 _next_steps(logger, report, redactor, scope)
+        if fmt == "text" and status in ("partial", "failed") and (written or manifest_committed):
+            logger.warning(
+                "Automatic recovery is incomplete; inspect these affected outputs:"
+                if recovery == "incomplete"
+                else "These import changes remain committed:"
+            )
+            for rel in written:
+                logger.tree_item(f"{apm_display}/{rel}")
+            if manifest_committed:
+                logger.tree_item(
+                    f"{manifest.name}: updated; {committed_mcp} MCP server(s) imported"
+                )
         if cleanup_failed:
             raise click.exceptions.Exit(1)
 

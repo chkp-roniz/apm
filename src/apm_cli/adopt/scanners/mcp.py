@@ -52,6 +52,16 @@ class McpScanner:
                     ScanError(f"<{runtime} mcp config>", f"adapter error: {type(exc).__name__}")
                 )
                 continue
+            if user_scope and not config_path.absolute().is_relative_to(ctx.root):
+                yield RawFinding(
+                    tool=runtime,
+                    scope=ctx.scope,
+                    kind=HarnessKind.UNKNOWN,
+                    display_path=f"<{runtime} MCP location outside selected home scope>",
+                    notes=("Configured location was not inspected; outside approved scope.",),
+                    evidence=("adapter-config-location",),
+                )
+                continue
             try:
                 ensure_path_within(config_path, ctx.root)
             except (PathTraversalError, OSError, RuntimeError):
@@ -59,10 +69,12 @@ class McpScanner:
                     config_path, "MCP config is outside or cannot be verified within selected scope"
                 )
                 continue
-            if not config_path.is_file():
-                continue
             try:
-                servers = adapter.get_native_server_configs(approved_root=ctx.root)
+                servers = adapter.get_native_server_configs(
+                    approved_root=ctx.root,
+                    admit_file=ctx.file_size,
+                    max_servers=ctx.limits.max_entries_per_rule,
+                )
             except Exception as exc:  # malformed on-disk config must not abort discovery
                 ctx.error(config_path, f"unreadable MCP config: {type(exc).__name__}")
                 continue

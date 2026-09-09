@@ -62,7 +62,7 @@ def discover(root: Path, scope: Scope, *, limits: ScanLimits | None = None) -> A
         redactor=redactor,
         limits=limits or ScanLimits(),
     )
-    ownership = OwnershipIndex.build(root, scope)
+    ownership = OwnershipIndex.build(root, scope, scan_context=ctx)
     findings: list[Finding] = []
     for raw in REGISTRY.scan_all(ctx):
         owner, evidence = ownership.decide(raw)

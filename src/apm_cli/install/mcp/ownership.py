@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ def resolve_mcp_target_servers(
     project_root: Path | None,
     user_scope: bool,
     approved_root: Path | None = None,
+    admit_file: Callable[[Path], int | None] | None = None,
+    max_servers: int | None = None,
+    non_interactive: bool = False,
 ) -> dict[str, set[str]]:
     """Return recorded ownership, adopting exact legacy baselines only when absent."""
     target_servers = {runtime: set(servers) for runtime, servers in recorded_target_servers.items()}
@@ -31,6 +35,9 @@ def resolve_mcp_target_servers(
         project_root=project_root,
         user_scope=user_scope,
         approved_root=approved_root,
+        admit_file=admit_file,
+        max_servers=max_servers,
+        non_interactive=non_interactive,
     )
 
 
@@ -55,6 +62,9 @@ def adopt_legacy_mcp_target_servers(
     project_root: Path | None,
     user_scope: bool,
     approved_root: Path | None = None,
+    admit_file: Callable[[Path], int | None] | None = None,
+    max_servers: int | None = None,
+    non_interactive: bool = False,
 ) -> dict[str, set[str]]:
     """Adopt exact native baselines; scoped callers authorize every read first.
 
@@ -92,7 +102,13 @@ def adopt_legacy_mcp_target_servers(
             )
             if approved_root is not None:
                 ensure_path_within(Path(client.get_config_path()), approved_root)
-                existing_configs = [client.get_native_server_configs(approved_root=approved_root)]
+                existing_configs = [
+                    client.get_native_server_configs(
+                        approved_root=approved_root,
+                        admit_file=admit_file,
+                        max_servers=max_servers,
+                    )
+                ]
             else:
                 existing_configs = [MCPConflictDetector(client).get_existing_server_configs()]
             legacy_reader = getattr(client, "get_legacy_current_config", None)
@@ -104,8 +120,15 @@ def adopt_legacy_mcp_target_servers(
                         if legacy_path is None:
                             raise ValueError("No declared legacy config path")
                         ensure_path_within(Path(legacy_path), approved_root)
-                    legacy_config = legacy_reader()
-                    legacy_servers = legacy_config.get(client.mcp_servers_key)
+                        legacy_servers = client.get_native_server_configs(
+                            approved_root=approved_root,
+                            admit_file=admit_file,
+                            max_servers=max_servers,
+                            legacy=True,
+                        )
+                    else:
+                        legacy_config = legacy_reader()
+                        legacy_servers = legacy_config.get(client.mcp_servers_key)
                     if isinstance(legacy_servers, dict):
                         existing_configs.append(legacy_servers)
                 except Exception:
@@ -117,9 +140,13 @@ def adopt_legacy_mcp_target_servers(
             continue
 
         for name, dependency in baselines.items():
+            if not any(name in existing for existing in existing_configs):
+                continue
             try:
+                render_options = {"non_interactive": True} if non_interactive else {}
                 expected = client.render_server_config(
-                    MCPIntegrator._build_self_defined_info(dependency)
+                    MCPIntegrator._build_self_defined_info(dependency),
+                    **render_options,
                 )
             except Exception:
                 logger.debug(

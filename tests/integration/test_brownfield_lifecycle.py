@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
+from apm_cli.integration.targets import KNOWN_TARGETS
 from tests.utils.apm_lifecycle_runner import ApmLifecycleRunner, CommandResult
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
 from tests.utils.lifecycle_state import LifecycleStateSnapshot
@@ -268,6 +269,153 @@ def test_brownfield_preview_apply_install_rerun(
         assert again.returncode == 0, _evidence(again)
         assert _machine(again)["write"]["written"] == []
         assert _full_snapshot(project) == settled
+
+
+def test_brownfield_global_preview_apply_install_rerun(
+    tmp_path: Path, apm_binary_path: Path
+) -> None:
+    """Global import/replay confines writes to HOME and settles without duplicate imports."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    home = Path(environment["HOME"])
+    profile = KNOWN_TARGETS["claude"]
+    # Cursor's user-scope rules are UI-only; replay the full fixture to Claude.
+    assert all(profile.supports_at_user_scope(kind) for kind in profile.primitives)
+    _seed(project)
+    _write(project, "apm.yml", "name: invoking-project\nversion: 1.0.0\ntargets: [cursor]\n")
+    _write(project, ".apm/instructions/local.instructions.md", "Project-only instructions.\n")
+    home_originals = {
+        **{rel: content for rel, content in _ORIGINALS.items() if rel.startswith(".claude/")},
+        ".claude/CLAUDE.md": "# User\nHand-authored user context.\n",
+        ".claude.json": _ORIGINALS[".mcp.json"],
+    }
+    sentinels = {
+        "Documents/unrelated.txt": "Unrelated home content.\n",
+        ".apm/personal-notes.txt": "Not an imported primitive or managed metadata.\n",
+        ".claude/personal-notes.txt": "Not an APM deployment.\n",
+        "CLAUDE.md": "An unmarked home-root file, not the user-context destination.\n",
+    }
+    for rel, content in {**home_originals, **sentinels}.items():
+        _write(home, rel, content)
+    (home / "Documents/empty").mkdir()
+    project_before = _full_snapshot(project)
+    home_before = _full_snapshot(home)
+
+    def assert_preserved() -> None:
+        """Check the invoking project and unrelated user-owned state after every command."""
+        assert _full_snapshot(project) == project_before, "global command changed the project"
+        for rel, content in sentinels.items():
+            assert (home / rel).read_bytes() == content.encode("utf-8"), rel
+        assert (home / "Documents/empty").is_dir()
+
+    preview = runner.run(
+        ("init", "--discover", "--global", "--format", "json"),
+        scenario_id="global-preview",
+        cwd=project,
+        env=environment,
+    )
+    assert preview.returncode == 0, _evidence(preview)
+    inventory = json.loads(preview.stdout)
+    assert inventory["scopes"] == ["user"] and not inventory["apm_yml_exists"]
+    assert "~/.claude/CLAUDE.md" in {finding["path"] for finding in inventory["findings"]}
+    assert _full_snapshot(home) == home_before, "global preview changed durable HOME state"
+    assert_preserved()
+
+    applied = _apply(runner, project, environment, "--global")
+    assert applied.returncode == 0, _evidence(applied)
+    payload = _machine(applied)
+    assert payload["write"]["status"] == "complete", payload
+    assert_preserved()
+    for rel, content in home_originals.items():
+        assert (home / rel).read_bytes() == content.encode("utf-8"), rel
+    imports = {
+        "instructions/python.instructions.md": b"Use type hints.",
+        "instructions/claude-root.instructions.md": b"Hand-authored user context.",
+        "agents/reviewer.agent.md": b"You review.",
+        "prompts/fix.prompt.md": b"Run the linter",
+        "skills/deploy/SKILL.md": b"# Deploy",
+        "hooks/claude-native.json": b"PreToolUse",
+    }
+    apm_home = home / ".apm"
+    for rel, content in imports.items():
+        assert content in (apm_home / rel).read_bytes(), rel
+    # Skills are committed/provenance-tracked as whole trees, not as SKILL.md alone.
+    destinations = {rel.removesuffix("/SKILL.md") for rel in imports}
+    assert set(payload["write"]["written"]) == destinations
+    provenance = json.loads((apm_home / ".import-sources.json").read_bytes())
+    assert set(provenance["entries"]) == destinations
+    manifest_bytes = (apm_home / "apm.yml").read_bytes()
+    manifest = yaml.safe_load(manifest_bytes)
+    assert manifest["targets"] == [profile.name]
+    assert [server["name"] for server in manifest["dependencies"]["mcp"]] == ["fixture"]
+    assert b"${FIXTURE_TOKEN}" in manifest_bytes
+    assert not (home / "apm.yml").exists()
+    assert not (apm_home / ".apm").exists(), "global primitives belong directly under ~/.apm"
+
+    install_args = (
+        "install",
+        "--global",
+        "--target",
+        profile.name,
+        "--no-policy",
+        "--parallel-downloads",
+        "0",
+    )
+    installed = runner.run(install_args, scenario_id="global-install", cwd=project, env=environment)
+    assert installed.returncode == 0, _evidence(installed)
+    assert_preserved()
+    assert b"Use type hints." in (home / ".claude/rules/python.md").read_bytes()
+    assert b"Hand-authored user context." in (home / ".claude/rules/claude-root.md").read_bytes()
+    for rel in (
+        ".claude/agents/reviewer.md",
+        ".claude/CLAUDE.md",
+    ):
+        assert (home / rel).read_bytes() == home_originals[rel].encode("utf-8"), rel
+    # The actual native reviewer destination is an unowned collision, not a new file.
+    assert not (home / ".claude/agents/agents-reviewer.md").exists()
+    assert (home / ".claude/skills/deploy/SKILL.md").read_bytes() == (
+        apm_home / "skills/deploy/SKILL.md"
+    ).read_bytes()
+    assert b"Run the linter" in (home / ".claude/commands/fix.md").read_bytes()
+    assert "fixture" in json.loads((home / ".claude.json").read_bytes())["mcpServers"]
+    lockfile = apm_home / "apm.lock.yaml"
+    from apm_cli.deps.lockfile import LockFile
+
+    lock = LockFile.read(lockfile)
+    assert lock is not None
+    assert lock.deployment_ledger.records, "global local deployment ownership must persist"
+    assert ".claude/rules/python.md" in lock.local_deployed_files
+    assert ".claude/rules/claude-root.md" in lock.local_deployed_files
+    assert ".claude/rules/python.md" in lock.local_deployed_file_hashes
+    assert ".claude/agents/reviewer.md" not in lock.local_deployed_files, (
+        "a preserved native collision must not become APM-owned"
+    )
+    assert not (home / "apm.lock.yaml").exists()
+    assert (apm_home / "apm.yml").read_bytes() == manifest_bytes
+
+    # Source-target installation can refresh native settings/provenance once.
+    # It must not allocate another primitive, and the next full cycle must settle.
+    rerun = _apply(runner, project, environment, "--global")
+    assert rerun.returncode == 0, _evidence(rerun)
+    assert set(_machine(rerun)["write"]["written"]) <= destinations
+    assert_preserved()
+    reinstalled = runner.run(
+        install_args, scenario_id="global-reinstall", cwd=project, env=environment
+    )
+    assert reinstalled.returncode == 0, _evidence(reinstalled)
+    assert_preserved()
+    assert (apm_home / "apm.yml").read_bytes() == manifest_bytes
+    settled = _full_snapshot(home)
+    again = _apply(runner, project, environment, "--global")
+    assert again.returncode == 0, _evidence(again)
+    assert _machine(again)["write"]["written"] == []
+    assert _full_snapshot(home) == settled, "settled global apply must be byte-idempotent"
+    assert_preserved()
+    final_install = runner.run(
+        install_args, scenario_id="global-settled-install", cwd=project, env=environment
+    )
+    assert final_install.returncode == 0, _evidence(final_install)
+    assert _full_snapshot(home) == settled, "settled global install must be byte-idempotent"
+    assert_preserved()
 
 
 def test_brownfield_partial_apply_is_unmistakable(tmp_path: Path, apm_binary_path: Path) -> None:
@@ -749,11 +897,11 @@ def test_brownfield_each_mcp_warning_precedes_consent_without_secrets(
     manifest = (project / "apm.yml").read_text(encoding="utf-8")
     assert _FAKE_TOKEN not in manifest
     entries = {entry["name"]: entry for entry in yaml.safe_load(manifest)["dependencies"]["mcp"]}
-    assert (
-        entries["a-needs-token"]["env"]["W5_SERVICE_TOKEN"] == "${A_NEEDS_TOKEN_W5_SERVICE_TOKEN}"
-    )
+    placeholder = entries["a-needs-token"]["env"]["W5_SERVICE_TOKEN"]
+    assert placeholder.startswith("${A_NEEDS_TOKEN_W5_SERVICE_TOKEN_")
+    assert placeholder.endswith("}")
     assert entries["z-safe"]["args"] == ["inert"]
-    assert "A_NEEDS_TOKEN_W5_SERVICE_TOKEN" in plan and "export" in plan.lower(), plan
+    assert placeholder[2:-1] in plan and "export" in plan.lower(), plan
 
 
 def test_brownfield_prompt_time_edit_is_rechecked_before_replace(

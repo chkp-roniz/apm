@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+
 from scripts.architecture_linter.checks.mutation_write_shared import (
     _has_fixed,
     _has_regex,
@@ -12,6 +14,7 @@ from scripts.architecture_linter.facts import FactsProvider
 from scripts.architecture_linter.models import Violation
 
 _HOOKS = "src/apm_cli/adopt/converters/hooks.py"
+_CLASSIFY = "src/apm_cli/adopt/classify.py"
 _SCANNER = "src/apm_cli/adopt/scanners/hooks.py"
 _INTEGRATOR = "src/apm_cli/integration/hook_integrator.py"
 _BUNDLE = "src/apm_cli/integration/hook_bundle.py"
@@ -23,10 +26,13 @@ _AGENT_VALIDATOR = "src/apm_cli/integration/opencode_frontmatter.py"
 
 def adopt_hook_contract(provider: FactsProvider, rule_id: str) -> tuple[Violation, ...]:
     """Require import dispatch, event identity and compatibility at their owner."""
-    facts, failures = _read_required(provider, rule_id, (_HOOKS, _FORMATS, _INTEGRATOR, _BUNDLE))
+    facts, failures = _read_required(
+        provider, rule_id, (_HOOKS, _CLASSIFY, _FORMATS, _INTEGRATOR, _BUNDLE)
+    )
     if failures:
         return failures
     checks = (
+        (_CLASSIFY, 'Importability.CONVERTIBLE, "{format}->apm_hooks"'),
         (_HOOKS, "document = read_native_hook_document("),
         (_HOOKS, "format_id=finding.format_id"),
         (_HOOKS, "event = binding.event"),
@@ -50,6 +56,24 @@ def adopt_hook_contract(provider: FactsProvider, rule_id: str) -> tuple[Violatio
             "native hook adoption must delegate dispatch, event identity and portability",
         )
     ]
+    tree = provider.tree_index(_CLASSIFY)
+    hook_keys = [
+        node
+        for node in (() if tree is None else tree.nodes)
+        if isinstance(node, ast.Tuple)
+        and len(node.elts) == 2
+        and ast.unparse(node.elts[1]) == "HarnessKind.HOOK"
+    ]
+    result.extend(
+        _require(
+            len(hook_keys) == 1
+            and ast.unparse(hook_keys[0].elts[0]) == "ANY"
+            and not _has_fixed(facts[_CLASSIFY], "passthrough.hook"),
+            rule_id,
+            _CLASSIFY,
+            "all discovered hooks must use the canonical native converter, without tool overrides",
+        )
+    )
     result.extend(
         _require(
             not _has_regex(
@@ -75,6 +99,9 @@ def adopt_hook_lexing(provider: FactsProvider, rule_id: str) -> tuple[Violation,
         (_LEXER, "def project_script_references("),
         (_HOOKS, "for reference in project_script_references(command):"),
         (_HOOKS, "command = command[:start] + replacement + command[end:]"),
+        (_HOOKS, "refuse_credentials(text)"),
+        (_HOOKS, "if SecurityGate.scan_text(text, candidate.name).should_block:"),
+        (_HOOKS, "content = stream.read(limit + 1)"),
         (_SCANNER, "references = project_script_references(declaration.command)"),
         (_SCANNER, "except UnsupportedHookCommand:"),
         (_SCANNER, "for reference in references:"),

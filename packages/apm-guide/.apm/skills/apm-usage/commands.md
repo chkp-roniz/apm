@@ -10,6 +10,12 @@
 
 ### Import existing configuration
 
+`--global` confines discovery to the selected home scope; externally configured
+MCP locations are uninspected inventory, not implicitly approved input.
+Use the exact generated environment names in the plan, including their stable
+identity suffixes. A failed staging cleanup can leave completed imports committed;
+inspect `write.reason`, `write.written`, and `write.recovery` before retrying.
+
 ```bash
 apm init --discover
 apm init --discover --apply

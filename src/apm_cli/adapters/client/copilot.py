@@ -834,22 +834,10 @@ class CopilotClientAdapter(MCPClientAdapter):
                 self._last_env_placeholder_keys.add(match.group(1))
             return self._translate_env_placeholder_for_runtime(value)
 
-        import sys
-
         from rich.prompt import Prompt
 
         env_overrides = env_overrides or {}
-        # If env_overrides is provided, it means we're in managed environment collection mode
-        skip_prompting = bool(env_overrides)
-
-        # Check for CI/automated environment via APM_E2E_TESTS flag (more reliable than TTY detection)
-        if os.getenv("APM_E2E_TESTS") == "1":
-            skip_prompting = True
-
-        # Also skip prompting if we're in a non-interactive environment (fallback)
-        is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
-        if not is_interactive:
-            skip_prompting = True
+        skip_prompting = self._should_skip_env_prompts(env_overrides)
 
         # Three accepted placeholder syntaxes (see _COPILOT_ENV_RE at module
         # top), all resolved against env_overrides -> os.environ -> optional

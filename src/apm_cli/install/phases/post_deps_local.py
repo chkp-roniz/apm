@@ -20,9 +20,8 @@ Two responsibilities:
    dep lockfile phase has already written dependency data; this phase
    simply augments the on-disk lockfile with the local fields.
 
-Scope guard: this phase only runs for ``InstallScope.PROJECT``.  User-
-scope installs do not track local deployed files (matching pre-refactor
-behavior).
+Both project and user scopes persist local deployments. The context selects
+the metadata root; the canonical reconciler owns scope-aware cleanup.
 """
 
 from __future__ import annotations
@@ -44,12 +43,6 @@ def run(ctx: InstallContext) -> None:
 
     Mutates ``ctx.local_deployed_files`` (appends failed cleanup paths).
     """
-    from apm_cli.core.scope import InstallScope
-
-    # Scope guard: only PROJECT scope tracks local deployed files.
-    if ctx.scope is not InstallScope.PROJECT:
-        return
-
     # Skip if there is no local content (current or previous).
     if not ctx.local_deployed_files and not ctx.old_local_deployed:
         return
@@ -123,7 +116,7 @@ def run(ctx: InstallContext) -> None:
         on_cleanup=_surface_local_cleanup,
         prior_ledger=_prior_ledger,
         current_run_trusted=not _local_had_errors,
-        user_scope=is_user_scope(getattr(ctx, "scope", None)),
+        user_scope=is_user_scope(ctx.scope),
     )
 
     DeploymentLedgerCodec.replace_context_local_files(ctx, sorted(_files))

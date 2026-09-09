@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,10 +21,57 @@ ROOT = Path(__file__).resolve().parents[2]
 RULE_ID = "contracts-tooling-import-provenance"
 OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
+RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
 GUARD = "scripts/architecture_linter/checks/contracts_import_provenance.py"
 BEHAVIOR = "tests/unit/adopt/test_import_provenance.py"
+PERFORMANCE = "tests/unit/adopt/test_provenance_performance.py"
 BOUNDARY = "tests/integration/test_architecture_import_provenance.py"
+
+
+def _current_spelling(old: str, text: str) -> str:
+    """Keep the same mutation proof when materialization adopts the per-plan API."""
+    if "ownership = provenance.for_plan(report.findings)" in text:
+        return old.replace(
+            "provenance.destination(finding, report.findings,",
+            "ownership.destination(finding,",
+        ).replace("provenance.outputs(dest_rel)", "ownership.outputs(dest_rel)")
+    return old
+
+
+def _indexed_materialize(text: str) -> str:
+    """Exercise the caller integration in a sandbox, never change the real caller."""
+    if "ownership = provenance.for_plan(report.findings)" in text:
+        return text
+    replacements = {
+        "allocator.reserve(provenance.entries)": (
+            "allocator.reserve(provenance.entries)\n"
+            "    ownership = provenance.for_plan(report.findings)"
+        ),
+        "provenance.destination(finding, report.findings,": "ownership.destination(finding,",
+        "decision = provenance.decide(\n": "witness = provenance.inspect(\n",
+        "            item = WriteItem(finding, converter.id, dest_rel, decision, source_hash)": (
+            "            decision = witness.decision\n"
+            "            item = WriteItem(finding, converter.id, dest_rel, decision, source_hash)"
+        ),
+        "provenance.outputs(dest_rel)": "ownership.outputs(dest_rel)",
+        "output_decision = provenance.decide(\n": (
+            "output_witness = witness if output == dest_rel else provenance.inspect(\n"
+        ),
+        '                if output_decision in ("locally-modified", "collision"):': (
+            "                output_decision = output_witness.decision\n"
+            '                if output_decision in ("locally-modified", "collision"):'
+        ),
+        "item.expected[output] = hash_source(apm_dir / output, root=provenance.root)": (
+            "item.expected[output] = output_witness.current_hash"
+        ),
+    }
+    # Replace the auxiliary spelling first; it contains the primary suffix.
+    for old, new in sorted(replacements.items(), key=lambda pair: -len(pair[0])):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new, 1)
+    ast.parse(text)
+    return text
 
 
 def test_import_provenance_owner_boundary() -> None:
@@ -31,6 +79,47 @@ def test_import_provenance_owner_boundary() -> None:
     result = run_selected_rules(ROOT, (RULE_ID,))
     assert result.failures == ()
     assert result.violations == ()
+
+
+@pytest.mark.parametrize(
+    ("relative", "old", "new"),
+    [
+        (RENDER, "logger.info,", "logger.warning,"),
+        (
+            MATERIALIZE,
+            "_emit_write_report(report, fmt, write_section)",
+            "__import__('apm_cli.utils.console', fromlist=['_reset_console'])._reset_console()\n"
+            "    _emit_write_report(report, fmt, write_section)",
+        ),
+        (RENDER, 'info("Import plan")', 'click.echo("Import plan")'),
+        (
+            MATERIALIZE,
+            "from .render import log_plan as _log_plan",
+            "from .render import render as _log_plan",
+        ),
+    ],
+)
+def test_import_output_owner_mutations_on_disk(
+    tmp_path: Path, relative: str, old: str, new: str
+) -> None:
+    """Restoring either parallel renderer or stream reset violates the output owner."""
+    rule = next(r for r in registered_rules() if r.id == "contracts-tooling-import-output")
+    paths = (MATERIALIZE, RENDER)
+    for source in paths:
+        target = tmp_path / source
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((ROOT / source).read_text())
+    path = tmp_path / relative
+    original = path.read_text()
+    assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
+    assert original.count(old) == 1
+    mutation = original.replace(old, new, 1)
+    ast.parse(mutation)
+    path.write_text(mutation)
+    violations = rule.check(FactsProvider(tmp_path, paths, registry=None))
+    assert any(item.rule_id == rule.id and item.path == relative for item in violations)
+    path.write_text(original)
+    assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
 
 
 @pytest.mark.parametrize(
@@ -136,6 +225,7 @@ def test_import_provenance_mutations_on_disk(tmp_path: Path, path: str, old: str
     assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
     target = tmp_path / path
     original = target.read_text(encoding="utf-8")
+    old = _current_spelling(old, original)
     assert original.count(old) == 1
     mutation = original.replace(old, new, 1)
     ast.parse(mutation)
@@ -145,6 +235,49 @@ def test_import_provenance_mutations_on_disk(tmp_path: Path, path: str, old: str
         assert any(v.rule_id == RULE_ID and v.path == path for v in violations), violations
     finally:
         target.write_text(original, encoding="utf-8")
+    assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        (
+            "ownership = provenance.for_plan(report.findings)",
+            "ownership = provenance.for_plan(())",
+        ),
+        (
+            "dest_rel = ownership.destination(finding, converter=converter.id)",
+            "dest_rel = None",
+        ),
+        ("outputs = ownership.outputs(dest_rel) or [dest_rel]", "outputs = [dest_rel]"),
+        ("witness if output == dest_rel else provenance.inspect", "provenance.inspect"),
+        ("identity=source_identity(finding)", "identity=None"),
+        ("item.expected[output] = output_witness.current_hash", "item.expected[output] = None"),
+        ("output_decision = output_witness.decision", 'output_decision = "refresh"'),
+    ],
+)
+def test_indexed_provenance_mutations_on_disk(tmp_path: Path, old: str, new: str) -> None:
+    """The optimized caller must retain owner delegation and real witness consumption."""
+    paths = (OWNER, MATERIALIZE, ALLOCATOR)
+    for relative in paths:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        target.write_text(
+            _indexed_materialize(text) if relative == MATERIALIZE else text, encoding="utf-8"
+        )
+    rule = next(rule for rule in registered_rules() if rule.id == RULE_ID)
+    assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
+    target = tmp_path / MATERIALIZE
+    original = target.read_text(encoding="utf-8")
+    match = re.search(r"\s+".join(re.escape(part) for part in old.split()), original)
+    assert match is not None
+    mutation = original[: match.start()] + new + original[match.end() :]
+    ast.parse(mutation)
+    target.write_text(mutation, encoding="utf-8")
+    violations = rule.check(FactsProvider(tmp_path, paths, registry=None))
+    assert any(v.rule_id == RULE_ID and v.path == MATERIALIZE for v in violations)
+    target.write_text(original, encoding="utf-8")
     assert rule.check(FactsProvider(tmp_path, paths, registry=None)) == ()
 
 
@@ -171,6 +304,20 @@ def test_import_provenance_mutations_on_disk(tmp_path: Path, path: str, old: str
             "entries = [path]",
             BEHAVIOR + "::test_hash_source_rejects_budget_before_any_content_read[tree-file]",
             id="behavior-bounded-hash",
+        ),
+        pytest.param(
+            OWNER,
+            "comparable = compute_file_hash(dest_abs)",
+            "current = comparable = compute_file_hash(dest_abs)",
+            PERFORMANCE + "::test_legacy_decision_retains_byte_exact_expected_witness",
+            id="behavior-legacy-full-witness",
+        ),
+        pytest.param(
+            OWNER,
+            "return ImportSourceIndex(self.entries, findings)",
+            "return ImportSourceIndex(self.entries, ())",
+            PERFORMANCE + "::test_plan_index_has_linear_record_and_finding_visits[legacy]",
+            id="behavior-plan-ambiguity-index",
         ),
         pytest.param(
             GUARD,
@@ -203,6 +350,7 @@ def test_provenance_mutation_kills_on_disk(
         "tests/unit/adopt/__init__.py",
         "tests/unit/adopt/conftest.py",
         BEHAVIOR,
+        PERFORMANCE,
         BOUNDARY,
     ):
         target = sandbox / relative
@@ -256,6 +404,7 @@ def test_provenance_mutation_kills_on_disk(
     assert baseline.returncode == 0, baseline.stdout + baseline.stderr
     target = sandbox / path
     original = target.read_text(encoding="utf-8")
+    old = _current_spelling(old, original)
     assert original.count(old) == 1
     mutation = original.replace(old, new, 1)
     ast.parse(mutation)

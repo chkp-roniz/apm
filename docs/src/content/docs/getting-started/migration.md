@@ -77,9 +77,9 @@ synchronized.
 
 ## Undo onboarding
 
-A failed import attempts to restore files, manifest, and provenance; inspect
-the reported recovery outcome before retrying. This does not undo a later
-installation.
+Commit failures attempt restoration; inspect the
+[result and recovery contract](../../reference/cli/init/#consent-and-results)
+before retrying. This does not undo a later installation.
 
 To undo a completed onboarding, review and restore the relevant changes from
 your checkpoint or backup. Deleting only `apm.yml` and `apm.lock.yaml` does not

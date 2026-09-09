@@ -1794,11 +1794,11 @@ class TestPostDepsLocalPhase:
         ctx.targets = []
         return ctx
 
-    def test_skips_when_user_scope(self, tmp_path: Path) -> None:
+    def test_skips_when_user_scope_has_no_local_content(self, tmp_path: Path) -> None:
         from apm_cli.install.phases.post_deps_local import run
 
         ctx = self._make_ctx(scope_project=False, tmp_path=tmp_path)
-        # Should return early without doing anything
+        # Both scopes skip metadata work when no local deployment needs reconciliation.
         with patch("apm_cli.deps.lockfile.LockFile") as mock_lf:
             run(ctx)
         mock_lf.assert_not_called()

@@ -10,7 +10,7 @@ from apm_cli.utils.atomic_io import write_text_lf
 
 from ..model import Finding
 from . import ConvertContext, ConvertError, ConvertResult
-from .base import emit_markdown, read_markdown, read_text, refuse_credentials
+from .base import emit_markdown, parse_markdown, read_text, refuse_credentials
 
 
 class _MarkdownPassthrough:
@@ -27,7 +27,7 @@ class _MarkdownPassthrough:
             raise ConvertError("no source path")
         text = read_text(finding.abs_path, ctx.limits.max_file_bytes)
         result = ConvertResult()
-        meta, body = read_markdown(finding.abs_path, ctx.limits.max_file_bytes, result)
+        meta, body = parse_markdown(text, result)
         refuse_credentials(text)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if result.changes:  # lenient parse: re-emit as strict YAML so apm install can read it

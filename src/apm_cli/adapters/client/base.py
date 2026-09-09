@@ -4,7 +4,8 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import cached_property, partial
 from pathlib import Path
@@ -15,6 +16,7 @@ from ...utils.console import _rich_error, _rich_warning
 from ...utils.path_security import ensure_path_within
 
 _INPUT_VAR_RE = re.compile(r"\$\{input:([^}]+)\}")
+_ENV_PROMPTS_DISABLED: ContextVar[bool] = ContextVar("mcp_env_prompts_disabled", default=False)
 
 # Matches ${VAR} and ${env:VAR}, capturing VAR. Intentionally does NOT match
 # ${input:VAR} (the optional ``env:`` group cannot also satisfy ``input:``),
@@ -258,11 +260,17 @@ def _has_env_placeholder(value):
     return bool(_ENV_PLACEHOLDER_RE.search(value))
 
 
-def server_configs_from_document(document: Any, key: str) -> dict[str, Mapping[str, Any]]:
+def server_configs_from_document(
+    document: Any, key: str, *, max_servers: int | None = None
+) -> dict[str, Mapping[str, Any]]:
     """Extract native server entries, including nested and dotted TOML tables."""
     if not key or not isinstance(document, Mapping):
         return {}
     nested = document.get(key)
+    if max_servers is not None and (
+        len(document) > max_servers or (isinstance(nested, Mapping) and len(nested) > max_servers)
+    ):
+        raise ValueError("MCP entry budget exceeded; not enumerated")
     servers = {
         str(name): config
         for name, config in (nested.items() if isinstance(nested, Mapping) else ())
@@ -272,6 +280,8 @@ def server_configs_from_document(document: Any, key: str) -> dict[str, Mapping[s
     for raw_key, config in document.items():
         if isinstance(raw_key, str) and raw_key.startswith(prefix) and isinstance(config, Mapping):
             servers.setdefault(raw_key[len(prefix) :].strip('"'), config)
+            if max_servers is not None and len(servers) > max_servers:
+                raise ValueError("MCP entry budget exceeded; not enumerated")
     return servers
 
 
@@ -398,13 +408,22 @@ class MCPClientAdapter(ABC):
             return self._project_root
         return Path(os.getcwd())
 
-    def render_server_config(self, server_info: dict) -> dict:
-        """Render one native server entry for exact baseline comparisons."""
-        rendered = self._format_server_config(
-            server_info,
-            env_overrides={},
-            runtime_vars={},
-        )
+    def render_server_config(self, server_info: dict, *, non_interactive: bool = False) -> dict:
+        """Render a baseline; discovery may forbid credential prompts explicitly.
+
+        Context-local policy reaches every canonical env resolver without
+        changing process environment or a shared adapter's install defaults.
+        Missing values retain the renderer's existing placeholder semantics.
+        """
+        token = _ENV_PROMPTS_DISABLED.set(_ENV_PROMPTS_DISABLED.get() or non_interactive)
+        try:
+            rendered = self._format_server_config(
+                server_info,
+                env_overrides={},
+                runtime_vars={},
+            )
+        finally:
+            _ENV_PROMPTS_DISABLED.reset(token)
         if isinstance(rendered, tuple):
             rendered = rendered[0]
         if not isinstance(rendered, dict):
@@ -445,21 +464,39 @@ class MCPClientAdapter(ABC):
             return json.load(config_file)
 
     def get_native_server_configs(
-        self, *, approved_root: Path | None = None
+        self,
+        *,
+        approved_root: Path | None = None,
+        admit_file: Callable[[Path], int | None] | None = None,
+        max_servers: int | None = None,
+        legacy: bool = False,
     ) -> dict[str, Mapping[str, Any]]:
         """Read native entries quietly, authorizing before any content probe.
 
         Import callers supply their selected project or user root. Adapters with
         additional read paths must authorize each path before opening it.
+        ``admit_file`` is the importer's regular-file/byte-budget policy, applied
+        before entering the adapter's parser. Install reads remain unbounded.
         """
-        config_path = Path(self.get_config_path())
+        path = self.get_legacy_config_path() if legacy else self.get_config_path()
+        if path is None:
+            return {}
+        config_path = Path(path)
         if approved_root is not None:
             ensure_path_within(config_path, approved_root)
+        if admit_file is not None and admit_file(config_path) is None:
+            return {}
         try:
             document = self._read_config(config_path)
         except FileNotFoundError:
             return {}
-        return server_configs_from_document(document, self.native_mcp_servers_key)
+        return server_configs_from_document(
+            document, self.native_mcp_servers_key, max_servers=max_servers
+        )
+
+    def get_legacy_config_path(self) -> str | None:
+        """Declare an obsolete native read path, if this adapter has one."""
+        return None
 
     @abstractmethod
     def configure_mcp_server(
@@ -1109,7 +1146,7 @@ class MCPClientAdapter(ABC):
         """
         import sys
 
-        if env_overrides:
+        if _ENV_PROMPTS_DISABLED.get() or env_overrides:
             return True
         if os.getenv("APM_E2E_TESTS") == "1":
             return True
@@ -1553,26 +1590,22 @@ class MCPClientAdapter(ABC):
             ``resolved`` dict mapping each env-var name to its resolved value
             (empty string when unresolvable).
         """
-        import sys
-
         env_overrides = env_overrides or {}
         resolved: dict = {}
 
         # Determine whether interactive prompting is available.
         # If env_overrides is provided the CLI has already collected variables -- never prompt again.
         skip_prompting = (
-            bool(env_overrides)
+            MCPClientAdapter._should_skip_env_prompts(env_overrides)
             or bool(os.getenv("CI"))
             or bool(os.getenv("APM_E2E_TESTS"))
-            or not sys.stdout.isatty()
-            or not sys.stdin.isatty()
         )
 
         # First pass: identify variables with empty values to warn the user.
         empty_value_vars = [
             ev for ev in env_vars if registry_field_is_required(ev) and not ev.get("value")
         ]
-        if empty_value_vars and skip_prompting:
+        if empty_value_vars and skip_prompting and not _ENV_PROMPTS_DISABLED.get():
             var_names = [ev.get("name") for ev in empty_value_vars]
             _rich_warning(
                 f"Required environment variables have no default value and cannot be "

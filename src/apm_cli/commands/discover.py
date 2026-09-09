@@ -10,6 +10,7 @@ from typing import Any
 import click
 
 from ..core.target_detection import TargetParamType
+from ..install.locking import serialized_lifecycle
 
 DISCOVER_HELP = (
     "Inventory existing agent-harness files (Claude, Copilot, Cursor, Codex, ...) "
@@ -65,7 +66,7 @@ def run_discover(
     yes: bool,
     verbose: bool,
 ) -> None:
-    """Invoke the adoption engine and exit with its status."""
+    """Invoke the adoption engine under the calling command's lifecycle lock."""
     from ..adopt import run_discover_command
 
     code = run_discover_command(
@@ -93,6 +94,7 @@ def run_discover(
 )
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
+@serialized_lifecycle
 def discover(write, output_format, global_, include_hook_scripts, target_flag, yes, verbose):
     """Alias of ``apm init --discover``."""
     run_discover(

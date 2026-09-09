@@ -258,11 +258,65 @@ def _shared_contraction_messages(provider: FactsProvider, rule_id: str) -> list[
     return findings
 
 
+def _post_local_scope_messages(provider: FactsProvider, rule_id: str) -> list[Violation]:
+    """Local persistence must forward both scopes to the canonical reconciler."""
+    index = provider.tree_index(_CONTRACTION_POST_LOCAL)
+    if index is None or index.root is None:
+        return []
+    findings: list[Violation] = []
+    for function in index.functions():
+        if getattr(function, "name", None) != "run":
+            continue
+        for node in index.own_scope(function):
+            if isinstance(node, (ast.If, ast.IfExp)) and any(
+                (isinstance(part, ast.Attribute) and part.attr == "scope")
+                or (isinstance(part, ast.Name) and part.id in {"InstallScope", "is_user_scope"})
+                or (isinstance(part, ast.Constant) and part.value == "scope")
+                for part in index.walk(node.test)
+            ):
+                findings.append(
+                    violation(
+                        rule_id,
+                        _CONTRACTION_POST_LOCAL,
+                        "post-deps local must not gate persistence by scope",
+                        line=node.lineno,
+                    )
+                )
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == _CLEANUP_OWNER_FN
+            ):
+                continue
+            if not any(
+                keyword.arg == "user_scope"
+                and isinstance(value := keyword.value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "is_user_scope"
+                and len(value.args) == 1
+                and isinstance(scope := value.args[0], ast.Attribute)
+                and scope.attr == "scope"
+                and isinstance(scope.value, ast.Name)
+                and scope.value.id == "ctx"
+                for keyword in node.keywords
+            ):
+                findings.append(
+                    violation(
+                        rule_id,
+                        _CONTRACTION_POST_LOCAL,
+                        "post-deps local must forward is_user_scope(ctx.scope) to reconciliation",
+                        line=node.lineno,
+                    )
+                )
+    return findings
+
+
 def check_target_file_contraction(provider: FactsProvider) -> tuple[Violation, ...]:
     """Target-scoped deployed-file contraction must stay owned by manifest_reconcile."""
     rule_id = _GUARD_TARGET_CONTRACTION
     findings = _contraction_ownership_messages(provider, rule_id)
     findings.extend(_shared_contraction_messages(provider, rule_id))
+    findings.extend(_post_local_scope_messages(provider, rule_id))
     return tuple(findings)
 
 

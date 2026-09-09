@@ -62,6 +62,8 @@ with `apm install --target grok-cloud`.
 Run discovery in the project directory; omit `PROJECT_NAME` or pass `.`.
 `--global` selects user scope instead. Registry paths identify candidates,
 not guaranteed inverse conversions.
+Configured MCP locations outside the selected home scope are listed as
+uninspected and ignored; discovery does not probe or import their contents.
 
 ```bash
 apm init --discover                   # read-only inventory
@@ -97,6 +99,8 @@ Preparation shows file changes, per-server warnings and environment setup,
 manifest edits, losses, skips, and refusals before one confirmation.
 `--yes` suppresses only that prompt. Actionable non-TTY apply requires `--yes`;
 empty or unchanged plans do not prompt.
+Export the exact placeholder names shown in the plan; generated names include
+a stable identity suffix to keep separate servers and fields independent.
 
 | Outcome | `write.status` | Exit |
 |---|---|---|
@@ -105,7 +109,7 @@ empty or unchanged plans do not prompt.
 | Item refusal, conversion error, scan error, or protected conflict; eligible remainder may commit | `partial` | `1` |
 | Actionable non-TTY apply without `--yes` | `refused` | `1` |
 | Declined or blank confirmation | `cancelled` | `0` |
-| Preparation, staged validation, or commit failure | `failed` | `1` |
+| Preparation, staged validation, commit, or staging cleanup failure | `failed` | `1` |
 
 Preview returns the inventory without `write`; a completed scan exits `0`
 even when `errors` lists unevaluated paths. It does not certify importability.
@@ -119,9 +123,16 @@ the apply plan and prompt use stderr. Apply adds:
 - `write.written`, `write.failed`, `write.skipped`, `write.manifest`, and
   `write.changes`: output paths, failures, decisions, manifest notes, and
   field-change records.
+- `write.reason`: failure detail, when present.
+- `write.mcp_imported` and `write.manifest_updated`: committed server count and
+  manifest-change flag, including imports that write no primitive files.
 - `write.recovery`: `not-needed`, `restored`, or `incomplete`. Commit failure
-  attempts restoration; incomplete recovery retains staging material for
-  inspection. Do not assume a failed operation restored everything.
+  attempts to restore files, manifest, and provenance; incomplete recovery
+  retains staging material for inspection.
+
+Cleanup failure can report `failed` after imports commit, with
+`write.recovery` still `not-needed`. Before retrying, inspect `write.reason`,
+`write.written`, and `write.recovery`; failure does not imply rollback.
 
 `refused` and `cancelled` commit nothing. EOF cancels the prompt in every
 format. Ordinary Click argument/usage errors

@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from apm_cli.adopt.converters import ConvertContext, ConvertError, ConvertResult
-from apm_cli.adopt.converters.mcp import McpConverter, to_manifest_entry
+from apm_cli.adopt.converters.mcp import McpConverter, placeholder_name, to_manifest_entry
 from apm_cli.adopt.model import HarnessKind, Ownership, RawFinding, Scope
 from apm_cli.adopt.ownership import OwnershipIndex
 from apm_cli.adopt.redact import Redactor, contains_credential
@@ -450,12 +450,13 @@ def test_mixed_placeholder_literals_are_scrubbed_and_replayable(
     field: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DEMO_CUSTOM", "synthetic-resolved")
+    placeholder = placeholder_name("demo", "CUSTOM", field=field)
+    monkeypatch.setenv(placeholder[2:-1], "synthetic-resolved")
     config = {"command": "echo"} if field == "env" else {"url": "https://example.test/mcp"}
     config[field] = {"CUSTOM": TOKEN + "${SUFFIX}"}
     result = ConvertResult()
     entry = to_manifest_entry("cursor", "demo", config, result)
-    assert entry[field] == {"CUSTOM": "${DEMO_CUSTOM}"}
+    assert entry[field] == {"CUSTOM": placeholder}
     assert contains_credential(json.dumps(entry)) is None
     adapter = ClientFactory.create_client("cursor", project_root=tmp_path)
     rendered = adapter.render_server_config(

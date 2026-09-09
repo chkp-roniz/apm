@@ -9,7 +9,7 @@ from apm_cli.utils.path_security import PathTraversalError, ensure_path_within
 
 from ..model import Finding
 from . import ConvertContext, ConvertError, ConvertResult
-from .base import emit_markdown, read_text
+from .base import emit_markdown, read_text, refuse_credentials
 from .rules import ALWAYS_ON
 
 MANAGED_START = "<!-- apm:start -->"
@@ -34,17 +34,20 @@ def strip_managed_section(text: str, result: ConvertResult) -> str:
 
 
 def rewrite_imports(text: str, source_dir: Path, project_root: Path, result: ConvertResult) -> str:
-    """Rewrite Claude ``@path`` import lines into links; drop escaping ones."""
+    """Rewrite Claude imports; diagnostics identify fields, never source values."""
     out: list[str] = []
+    import_index = 0
     for line in text.splitlines():
         match = _IMPORT_LINE.match(line.strip())
         if not match:
             out.append(line)
             continue
         target = match.group("target")
+        import_index += 1
+        field = f"body.import[{import_index}]"
         if target.startswith("~") or Path(target).is_absolute():
             result.drop(
-                f"body.import[{target}]",
+                field,
                 "machine-local import path removed",
             )
             continue
@@ -52,14 +55,14 @@ def rewrite_imports(text: str, source_dir: Path, project_root: Path, result: Con
         try:
             ensure_path_within(candidate, project_root.resolve(strict=False))
         except PathTraversalError:
-            result.drop(f"body.import[{target}]", "import escapes the project; removed")
+            result.drop(field, "import escapes the project; removed")
             continue
         if (source_dir / target).is_symlink() or not candidate.exists():
-            result.drop(f"body.import[{target}]", "import target missing or symlinked; removed")
+            result.drop(field, "import target missing or symlinked; removed")
             continue
         rel = PurePosixPath(candidate.relative_to(project_root.resolve(strict=False)).as_posix())
         out.append(f"See [{rel}]({rel}).")
-        result.transform(f"body.import[{target}]", "Claude @import rewritten as a link")
+        result.transform(field, "Claude @import rewritten as a link")
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
@@ -75,6 +78,8 @@ class RootContextConverter:
         if finding.abs_path is None:
             raise ConvertError("no source path")
         text = read_text(finding.abs_path, ctx.limits.max_file_bytes)
+        # Screen the bounded original before lossy edits can remove credentials.
+        refuse_credentials(text)
         result = ConvertResult()
         text = strip_managed_section(text, result)
         if finding.tool == "claude":

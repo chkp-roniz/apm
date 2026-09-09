@@ -7,6 +7,8 @@ remain reference-only. Outgoing URLs are never reconstructed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shlex
 from collections.abc import Mapping
@@ -78,15 +80,22 @@ def _check_fragment(value: Any, path: str = "entry") -> None:
         raise ConvertError(f"{path}: literal credential has no safe replay conversion")
 
 
-def placeholder_name(server: str, key: str) -> str:
-    """Allocate an environment identifier accepted by existing renderers."""
+def placeholder_name(server: str, key: str, *, field: str = "") -> str:
+    """Name the original identity, never its secret or its discovery position.
+
+    Slugs are only a readable prefix: punctuation, case and prefix elision are
+    lossy. A length-delimited identity hash keeps independent credentials apart,
+    including when another colliding server/key appears on a later import.
+    """
     server_slug = re.sub(r"[^A-Z0-9]+", "_", server.upper()).strip("_")
     key_slug = re.sub(r"[^A-Z0-9]+", "_", key.upper()).strip("_")
     slug = key_slug if key_slug.startswith(server_slug + "_") else f"{server_slug}_{key_slug}"
     slug = slug.strip("_") or "MCP_VALUE"
     if slug[0].isdigit():
         slug = "MCP_" + slug
-    return "${" + slug + "}"
+    identity = json.dumps([server, field, key], ensure_ascii=True, separators=(",", ":"))
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32].upper()
+    return "${" + slug[:64] + "_" + suffix + "}"
 
 
 def _sanitize_name(name: str, result: ConvertResult) -> str:
@@ -114,7 +123,7 @@ def _scrub_map(
         if _literal_secret(text, str(key)):
             if not allow_placeholders:
                 raise ConvertError(f"{path}: literal credential has no safe replay conversion")
-            out[str(key)] = placeholder_name(server, str(key))
+            out[str(key)] = placeholder_name(server, str(key), field=field)
             result.redacted(
                 path,
                 f"literal replaced by environment reference; export {out[str(key)][2:-1]} "
@@ -256,7 +265,7 @@ def to_manifest_entry(
         env = config.get("environment") if tool == "opencode" else config.get("env")
         consumed.add("env")
         if isinstance(env, Mapping) and env:
-            entry["env"] = _scrub_map(env, server, "env", result, references=references)
+            entry["env"] = _scrub_map(env, name, "env", result, references=references)
         if config.get("cwd"):
             entry["cwd"] = str(config["cwd"])
             consumed.add("cwd")
@@ -269,7 +278,7 @@ def to_manifest_entry(
         if isinstance(raw_headers, Mapping) and raw_headers:
             entry["headers"] = _scrub_map(
                 raw_headers,
-                server,
+                name,
                 "headers" if config.get("headers") else "http_headers",
                 result,
                 references=references,

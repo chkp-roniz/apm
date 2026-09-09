@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from apm_cli.core.command_logger import CommandLogger
 from apm_cli.utils.yaml_io import yaml_to_str
 
-from .model import AdoptionReport, Finding, Importability
+from .converters import summarize_changes
+from .model import AdoptionReport, Finding, HarnessKind, Importability, ScanError
+
+if TYPE_CHECKING:
+    from .materialize import WriteItem, WritePlan
 
 _COLUMNS = ("TOOL", "SCOPE", "KIND", "PATH", "IMPORT", "OWNER", "RISK", "-> DEST")
 _RISK_SHORT = {"executes-code": "exec", "network": "net", "writes-files": "write"}
@@ -129,6 +133,84 @@ def render(
         click.echo(report_to_yaml(report))
     else:
         render_text(report, logger, next_steps)
+
+
+def log_plan(
+    plan: WritePlan,
+    to_write: list[WriteItem],
+    manifest_notes: list[str],
+    validation_problems: list[str],
+    *,
+    logger: CommandLogger,
+    apm_display: str,
+    manifest_name: str,
+    scan_errors: tuple[ScanError, ...] = (),
+) -> None:
+    """Disclose the import plan through the command's existing output routing."""
+    info, tree_item, warning, error = (
+        logger.info,
+        logger.tree_item,
+        logger.warning,
+        logger.error,
+    )
+    file_items = [
+        i
+        for i in to_write
+        if i.finding.kind is not HarnessKind.MCP_SERVER
+        and i.decision in ("write", "refresh")
+        and not i.error
+    ]
+    mcp_items = [
+        i
+        for i in to_write
+        if i.finding.kind is HarnessKind.MCP_SERVER
+        and i.decision in ("write", "refresh")
+        and not i.error
+    ]
+    failures = [i for i in to_write if i.error]
+    info("Import plan")
+    if scan_errors:
+        warning(f"{len(scan_errors)} scan error(s); affected configuration is not imported:")
+        for problem in scan_errors[:20]:
+            tree_item(f"{problem.display_path}: {problem.reason}")
+    if file_items:
+        info(f"Will write {len(file_items)} file(s) into {apm_display}/:")
+        for item in file_items:
+            summary = summarize_changes(item.result.changes) if item.result else ""
+            tree_item(
+                f"{item.finding.display_path} -> {item.dest_rel} ({item.decision}) [{summary}]"
+            )
+            for change in item.result.changes if item.result else ():
+                if change.severity == "warning":
+                    tree_item(f"    {change.path}: {change.reason}")
+    if mcp_items:
+        info(f"Will add {len(mcp_items)} MCP server(s) to {manifest_name}:")
+        for item in mcp_items:
+            tree_item(item.finding.display_path)
+            for change in item.result.changes if item.result else ():
+                if change.severity == "warning":
+                    tree_item(f"    {change.path}: {change.reason}")
+    if manifest_notes:
+        info(f"{manifest_name} changes:")
+        for note in manifest_notes:
+            tree_item(note)
+    unchanged = [i for i in plan.items if i.decision not in ("write", "refresh")]
+    if unchanged or plan.skipped:
+        info("Not written:")
+        for item in unchanged:
+            tree_item(f"{item.finding.display_path} -> {item.dest_rel}: {item.decision}")
+            if item.decision in ("locally-modified", "collision"):
+                tree_item("    Inspect and reconcile the retained output before retrying.")
+        for finding, reason in plan.skipped:
+            tree_item(f"{finding.display_path}: {reason}")
+    if failures:
+        warning(f"{len(failures)} item(s) cannot be imported and will be left out:")
+        for item in failures:
+            tree_item(f"{item.finding.display_path}: {item.error}")
+    if validation_problems:
+        error("Staged files failed validation; nothing can be written:")
+        for problem in validation_problems[:20]:
+            tree_item(problem)
 
 
 __all__ = ["render", "render_text", "report_to_json", "report_to_yaml"]

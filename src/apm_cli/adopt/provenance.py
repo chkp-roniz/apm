@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import stat
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -118,6 +120,68 @@ class ImportRecord:
         return asdict(self)
 
 
+class ImportSourceIndex:
+    """Attribution indices for one plan, rebuilt after provenance/finding changes.
+
+    Construction visits each record and finding once. Destination queries use
+    constant-time identity and legacy ambiguity lookups; output queries cost
+    only the number of returned outputs. No filesystem evidence is cached here.
+    """
+
+    def __init__(self, entries: Mapping[str, ImportRecord], findings: Iterable[Finding]) -> None:
+        self._exact: dict[str, list[str]] = {}
+        self._legacy: dict[tuple[str, str, str | None], list[str]] = {}
+        self._outputs: dict[str, list[str]] = {}
+        for dest, record in entries.items():
+            if record.identity:
+                if not record.primary or record.primary == dest:
+                    self._exact.setdefault(record.identity, []).append(dest)
+            else:
+                key = (record.source, record.scope, record.converter)
+                self._legacy.setdefault(key, []).append(dest)
+            self._outputs.setdefault(dest, []).append(dest)
+            if record.primary != dest:
+                self._outputs.setdefault(record.primary, []).append(dest)
+        self._candidates = Counter(
+            (finding.display_path, finding.scope.value, finding.converter_id)
+            for finding in findings
+        )
+
+    def destination(self, finding: Finding, *, converter: str = "") -> str | None:
+        """Reuse exact ownership; accept legacy attribution only when unambiguous."""
+        matches = self._exact.get(source_identity(finding), ())
+        if len(matches) == 1:
+            return matches[0]
+        key = (finding.display_path, finding.scope.value, finding.converter_id)
+        if self._candidates[key] != 1:
+            return None
+        # At most two distinct converter IDs; do not count an alias twice or
+        # flatten an arbitrarily large ambiguous bucket for each finding.
+        legacy = [
+            self._legacy.get((finding.display_path, finding.scope.value, candidate), ())
+            for candidate in {finding.converter_id, converter}
+        ]
+        if sum(len(bucket) for bucket in legacy) != 1:
+            return None
+        return next(bucket[0] for bucket in legacy if bucket)
+
+    def outputs(self, primary: str) -> list[str]:
+        """Return owned outputs, retaining auxiliary and removed-source reservations."""
+        return list(self._outputs.get(primary, ()))
+
+
+@dataclass(frozen=True)
+class OutputWitness:
+    """One preparation-phase decision and its byte-exact expected output hash.
+
+    ``current_hash`` can be absent on protected/refused outputs. Reuse this
+    value only within preparation, never instead of a post-prompt/commit read.
+    """
+
+    decision: Decision
+    current_hash: str | None = None
+
+
 @dataclass
 class ImportSources:
     """The sole authority for destination reservations and refresh authorization."""
@@ -170,33 +234,16 @@ class ImportSources:
     def destination(
         self, finding: Finding, findings: tuple[Finding, ...], *, converter: str = ""
     ) -> str | None:
-        """Reuse exact ownership; accept legacy attribution only when unambiguous."""
-        identity = source_identity(finding)
-        matches = [
-            dest
-            for dest, rec in self.entries.items()
-            if rec.identity == identity and (not rec.primary or rec.primary == dest)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        legacy = [
-            dest
-            for dest, rec in self.entries.items()
-            if not rec.identity
-            and (rec.source, rec.scope) == (finding.display_path, finding.scope.value)
-            and rec.converter in (finding.converter_id, converter)
-        ]
-        candidates = [
-            other
-            for other in findings
-            if (other.display_path, other.scope, other.converter_id)
-            == (finding.display_path, finding.scope, finding.converter_id)
-        ]
-        return legacy[0] if len(legacy) == len(candidates) == 1 else None
+        """Single-query compatibility API; planners should reuse ``for_plan``."""
+        return self.for_plan(findings).destination(finding, converter=converter)
+
+    def for_plan(self, findings: Iterable[Finding]) -> ImportSourceIndex:
+        """Build once before the finding loop; discard when that plan ends."""
+        return ImportSourceIndex(self.entries, findings)
 
     def outputs(self, primary: str) -> list[str]:
-        """All outputs owned by one import, including its auxiliary namespace."""
-        return [dest for dest, record in self.entries.items() if primary in (dest, record.primary)]
+        """Single-query compatibility API for an import's complete output set."""
+        return self.for_plan(()).outputs(primary)
 
     def decide(
         self,
@@ -206,32 +253,46 @@ class ImportSources:
         *,
         identity: str | None = None,
     ) -> Decision:
+        """Return a fresh decision; callers needing its hash should use ``inspect``."""
+        return self.inspect(dest_rel, dest_abs, source_hash, identity=identity).decision
+
+    def inspect(
+        self,
+        dest_rel: str,
+        dest_abs: Path,
+        source_hash: str | None,
+        *,
+        identity: str | None = None,
+    ) -> OutputWitness:
         """Never authorize replacement using another source's or missing evidence."""
         record = self.entries.get(dest_rel)
         anchor = self.root or self.path.parent.parent
         approved_path(dest_abs, anchor, mutable=True)
         exists = dest_abs.exists()
         if record is None:
-            return "collision" if exists else "write"
+            return OutputWitness("collision" if exists else "write")
         if identity is not None and record.identity and identity != record.identity:
-            return "collision"
+            return OutputWitness("collision")
         if source_hash is None:
-            return "source-missing"
+            return OutputWitness("source-missing")
         if not exists:
-            return "locally-modified"
+            return OutputWitness("locally-modified")
         if not record.output_sha256:
-            return "locally-modified"
+            return OutputWitness("locally-modified")
         try:
             current = hash_source(dest_abs, root=anchor)
+            comparable = current
             if not record.output_sha256.startswith(_FINGERPRINT):
                 if not dest_abs.is_file() or not record.output_sha256.startswith("sha256:"):
-                    return "locally-modified"
-                current = compute_file_hash(dest_abs)
+                    return OutputWitness("locally-modified", current)
+                comparable = compute_file_hash(dest_abs)
         except (OSError, ValueError):
-            return "locally-modified"
-        if current != record.output_sha256:
-            return "locally-modified"
-        return "unchanged" if source_hash == record.source_sha256 else "refresh"
+            return OutputWitness("locally-modified")
+        if comparable != record.output_sha256:
+            return OutputWitness("locally-modified", current)
+        return OutputWitness(
+            "unchanged" if source_hash == record.source_sha256 else "refresh", current
+        )
 
     def record(
         self,

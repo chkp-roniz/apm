@@ -30,6 +30,8 @@ def test_adopt_mcp_ownership_has_registered_consumer_and_guard() -> None:
     [
         ("mcp_ownership.resolve_mcp_target_servers(", "_incorrect_local_ownership("),
         ("approved_root=root,", "approved_root=None,"),
+        ("admit_file=ctx.file_size,", "admit_file=None,"),
+        ("non_interactive=True,", "non_interactive=False,"),
     ],
 )
 def test_static_guard_rejects_consumer_bypass(old: str, new: str) -> None:
@@ -81,6 +83,48 @@ def test_static_guard_rejects_native_read_authorization_removed() -> None:
     ],
 )
 def test_static_guard_rejects_mutating_native_read_path(path: str, old: str, new: str) -> None:
+    source = (ROOT / path).read_text()
+    mutated = source.replace(old, new)
+    assert mutated != source
+    report = run_selected_rules(ROOT, (RULE,), source_overrides={path: mutated})
+    assert report.failures == ()
+    assert any(v.rule_id == RULE and v.path == path for v in report.violations)
+
+
+@pytest.mark.parametrize(
+    "path,old,new",
+    [
+        (
+            "src/apm_cli/adopt/scanners/mcp.py",
+            "admit_file=ctx.file_size,",
+            "admit_file=None,",
+        ),
+        (OWNER, "admit_file=admit_file,", "admit_file=None,"),
+        (OWNER, "max_servers=max_servers,", "max_servers=None,"),
+        (OWNER, "legacy=True,", "legacy=False,"),
+        (
+            "src/apm_cli/adopt/__init__.py",
+            "scan_context=ctx",
+            "scan_context=None",
+        ),
+        (
+            "src/apm_cli/adapters/client/base.py",
+            "admit_file(config_path) is None",
+            "False",
+        ),
+        (
+            "src/apm_cli/adapters/client/base.py",
+            "_ENV_PROMPTS_DISABLED.get() or non_interactive",
+            "_ENV_PROMPTS_DISABLED.get()",
+        ),
+        (
+            "src/apm_cli/adapters/client/copilot.py",
+            "self._should_skip_env_prompts(env_overrides)",
+            "False",
+        ),
+    ],
+)
+def test_static_guard_rejects_import_mcp_policy_bypass(path: str, old: str, new: str) -> None:
     source = (ROOT / path).read_text()
     mutated = source.replace(old, new)
     assert mutated != source

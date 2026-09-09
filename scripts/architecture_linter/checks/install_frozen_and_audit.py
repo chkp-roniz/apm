@@ -257,7 +257,96 @@ def check_mcp_ownership_migration(provider: FactsProvider) -> tuple[Violation, .
                 )
             )
     findings.extend(_check_native_mcp_reads(provider, rule_id))
+    findings.extend(_check_mcp_import_policies(provider, rule_id))
     return tuple(findings)
+
+
+def _check_mcp_import_policies(provider: FactsProvider, rule_id: str) -> list[Violation]:
+    """Require admission/context plumbing at the canonical MCP call sites."""
+    findings: list[Violation] = []
+    scoped_policy = {
+        "admit_file": "ctx.file_size",
+        "max_servers": "ctx.limits.max_entries_per_rule",
+    }
+    forwarding = {"admit_file": "admit_file", "max_servers": "max_servers"}
+    contracts = [
+        (
+            "src/apm_cli/adopt/ownership.py",
+            "resolve_mcp_target_servers",
+            {**scoped_policy, "non_interactive": "True"},
+        ),
+        ("src/apm_cli/adopt/scanners/mcp.py", "get_native_server_configs", scoped_policy),
+        ("src/apm_cli/adopt/__init__.py", "build", {"scan_context": "ctx"}),
+        (_MCP_OWNERSHIP_OWNER, "get_native_server_configs", forwarding),
+        (_MCP_OWNERSHIP_OWNER, "adopt_legacy_mcp_target_servers", forwarding),
+    ]
+    for path, function, required in contracts:
+        tree = provider.tree_index(path)
+        calls = [
+            node
+            for node in (tree.nodes if tree else ())
+            if isinstance(node, ast.Call)
+            and (
+                node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else getattr(node.func, "id", "")
+            )
+            == function
+        ]
+        if not calls or any(
+            not required.items() <= {kw.arg: ast.unparse(kw.value) for kw in call.keywords}.items()
+            for call in calls
+        ):
+            findings.append(
+                _summary(rule_id, path, "MCP import must forward canonical read and prompt policy")
+            )
+    # Inspect executable AST, not comments, for the few method-local policy gates.
+    method_contracts = [
+        (
+            _MCP_OWNERSHIP_OWNER,
+            "adopt_legacy_mcp_target_servers",
+            (
+                "legacy=True",
+                "if not any((name in existing for existing in existing_configs)):",
+                "{'non_interactive': True} if non_interactive else {}",
+                "**render_options",
+            ),
+        ),
+        (
+            "src/apm_cli/adapters/client/base.py",
+            "render_server_config",
+            (
+                "_ENV_PROMPTS_DISABLED.set(_ENV_PROMPTS_DISABLED.get() or non_interactive)",
+                "_ENV_PROMPTS_DISABLED.reset(token)",
+            ),
+        ),
+        (
+            "src/apm_cli/adapters/client/base.py",
+            "_should_skip_env_prompts",
+            ("_ENV_PROMPTS_DISABLED.get() or env_overrides",),
+        ),
+        (
+            "src/apm_cli/adapters/client/copilot.py",
+            "_resolve_env_variable",
+            ("self._should_skip_env_prompts(env_overrides)",),
+        ),
+    ]
+    for path, method_name, required_snippets in method_contracts:
+        tree = provider.tree_index(path)
+        methods = [
+            ast.unparse(node)
+            for node in (tree.nodes if tree else ())
+            if isinstance(node, ast.FunctionDef) and node.name == method_name
+        ]
+        if not methods or any(
+            snippet not in method for method in methods for snippet in required_snippets
+        ):
+            findings.append(
+                _summary(
+                    rule_id, path, "MCP comparison must preserve noninteractive, bounded reads"
+                )
+            )
+    return findings
 
 
 def _check_native_mcp_reads(provider: FactsProvider, rule_id: str) -> list[Violation]:
@@ -306,10 +395,25 @@ def _check_native_mcp_reads(provider: FactsProvider, rule_id: str) -> list[Viola
                     for call in calls
                     if isinstance(call.func, ast.Attribute) and call.func.attr == "_read_config"
                 ]
+                admissions = [
+                    call
+                    for call in calls
+                    if isinstance(call.func, ast.Name)
+                    and call.func.id == "admit_file"
+                    and len(call.args) == 1
+                    and isinstance(call.args[0], ast.Name)
+                    and call.args[0].id == "config_path"
+                ]
                 if (
                     not guards
                     or not reads
+                    or not admissions
                     or any(read.lineno <= guards[0].lineno for read in reads)
+                    or any(
+                        read.lineno <= admission.lineno
+                        for read in reads
+                        for admission in admissions
+                    )
                     or any(
                         isinstance(call.func, ast.Attribute)
                         and call.func.attr == "get_current_config"
@@ -457,6 +561,7 @@ def check_lifecycle_serialization(provider: FactsProvider) -> tuple[Violation, .
             "clean": "serialized_lifecycle_unless",
             "update": "serialized_lifecycle",
         },
+        "src/apm_cli/commands/discover.py": {"discover": "serialized_lifecycle"},
         "src/apm_cli/commands/experimental.py": {
             "enable_flag": "serialized_lifecycle",
             "disable_flag": "serialized_lifecycle",
@@ -502,6 +607,25 @@ def check_lifecycle_serialization(provider: FactsProvider) -> tuple[Violation, .
                         f"{name} must route through @{decorator}",
                     )
                 )
+
+    discover_path = "src/apm_cli/commands/discover.py"
+    discover, failures = _facts_for(provider, discover_path, rule_id)
+    if failures:
+        findings.extend(failures)
+    else:
+        helper = next((d for d in discover.definitions if d.name == "run_discover"), None)
+        if helper is not None and (
+            any("serialized_lifecycle" in item for item in helper.decorators)
+            or _name_calls_in(discover, "run_discover")
+            & {"lifecycle_operation", "acquire_lifecycle_lock", "serialized_lifecycle"}
+        ):
+            findings.append(
+                _summary(
+                    rule_id,
+                    discover_path,
+                    "run_discover must inherit its caller's lock, not acquire a nested lock",
+                )
+            )
 
     watcher_path = "src/apm_cli/commands/compile/watcher.py"
     watcher, failures = _facts_for(provider, watcher_path, rule_id)

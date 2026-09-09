@@ -18,11 +18,47 @@ FORMATS = "src/apm_cli/integration/hook_native_formats.py"
 INTEGRATOR = "src/apm_cli/integration/hook_integrator.py"
 BUNDLE = "src/apm_cli/integration/hook_bundle.py"
 AGENTS = "src/apm_cli/adopt/converters/agents.py"
+CLASSIFY = "src/apm_cli/adopt/classify.py"
+DISCOVER = "src/apm_cli/commands/discover.py"
+INIT = "src/apm_cli/commands/init.py"
 
 
 @pytest.mark.parametrize(
     ("rule_id", "path", "old", "new"),
     [
+        (
+            "mutation_writes.neutral_hook_contract",
+            CLASSIFY,
+            "    (ANY, HarnessKind.HOOK): ClassRule(",
+            '    ("copilot", HarnessKind.HOOK): ClassRule(\n'
+            '        Importability.APM_NATIVE, "passthrough.hook"\n'
+            "    ),\n"
+            "    (ANY, HarnessKind.HOOK): ClassRule(",
+        ),
+        (
+            "mutation_writes.neutral_hook_contract",
+            CLASSIFY,
+            '"{format}->apm_hooks"',
+            '"passthrough.hook"',
+        ),
+        (
+            "install-deployment-lifecycle-serialization",
+            DISCOVER,
+            "@serialized_lifecycle\ndef discover(",
+            "def discover(",
+        ),
+        (
+            "install-deployment-lifecycle-serialization",
+            INIT,
+            "@serialized_lifecycle\ndef init(",
+            "def init(",
+        ),
+        (
+            "install-deployment-lifecycle-serialization",
+            DISCOVER,
+            "def run_discover(",
+            "@serialized_lifecycle\ndef run_discover(",
+        ),
         (
             "mutation_writes.neutral_hook_contract",
             HOOKS,
@@ -52,6 +88,24 @@ AGENTS = "src/apm_cli/adopt/converters/agents.py"
             HOOKS,
             "for reference in project_script_references(command):",
             "for reference in local_script_references(command):",
+        ),
+        (
+            "mutation_writes.hook_command_vocabulary",
+            HOOKS,
+            "refuse_credentials(text)",
+            "pass",
+        ),
+        (
+            "mutation_writes.hook_command_vocabulary",
+            HOOKS,
+            "if SecurityGate.scan_text(text, candidate.name).should_block:",
+            "if False:",
+        ),
+        (
+            "mutation_writes.hook_command_vocabulary",
+            HOOKS,
+            "content = stream.read(limit + 1)",
+            "content = stream.read()",
         ),
         (
             "mutation_writes.hook_command_vocabulary",

@@ -38,9 +38,10 @@
       "owner": "CommandLogger / console owner",
       "selectors": [
         "src/apm_cli/core/command_logger.py",
-        "src/apm_cli/utils/console.py"
+        "src/apm_cli/utils/console.py",
+        "src/apm_cli/adopt/render.py"
       ],
-      "guards": ["registry-delegation-output-diagnostics"]
+      "guards": ["registry-delegation-output-diagnostics", "contracts-tooling-import-output"]
     },
     {
       "id": "compiled-output-writes",
