@@ -82,18 +82,38 @@ class ImportSources:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
-    def decide(self, dest_rel: str, dest_abs: Path, source_hash: str | None) -> Decision:
+    def dest_for_source(self, source: str) -> str | None:
+        """Return the destination previously recorded for *source*, if any."""
+        for dest, record in self.entries.items():
+            if record.source == source:
+                return dest
+        return None
+
+    def decide(
+        self,
+        dest_rel: str,
+        dest_abs: Path,
+        source_hash: str | None,
+        *,
+        source: str | None = None,
+    ) -> Decision:
         """Apply the idempotency table for one destination."""
         record = self.entries.get(dest_rel)
         exists = dest_abs.exists()
         if record is None:
             return "collision" if exists else "write"
+        if source is not None and record.source != source:
+            return "collision"
         if source_hash is None:
             return "source-missing"
         if not exists:
             return "write"
-        current = compute_file_hash(dest_abs) if dest_abs.is_file() else ""
-        if current != record.output_sha256:
+        current = output_hash(dest_abs)
+        if record.output_sha256:
+            if current != record.output_sha256:
+                return "locally-modified"
+        elif current:
+            # Legacy sidecars stored "" for directories; treat as unverified.
             return "locally-modified"
         if source_hash == record.source_sha256:
             return "unchanged"
@@ -114,8 +134,17 @@ class ImportSources:
             scope=scope,
             converter=converter,
             source_sha256=source_hash,
-            output_sha256=compute_file_hash(dest_abs) if dest_abs.is_file() else "",
+            output_sha256=output_hash(dest_abs),
         )
+
+
+def output_hash(path: Path) -> str:
+    """Hash a written file or directory tree for provenance comparisons."""
+    if path.is_file():
+        return compute_file_hash(path)
+    if path.is_dir():
+        return hash_source(path) or ""
+    return ""
 
 
 def hash_source(path: Path | None) -> str | None:

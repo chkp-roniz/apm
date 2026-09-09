@@ -46,8 +46,9 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
     }
 )
 _PROJECT_DIR_VARS = re.compile(
-    r"""^(?:"?\$\{?CLAUDE_PROJECT_DIR\}?"?|\$env:CLAUDE_PROJECT_DIR|\$\{?workspaceFolder\}?)[\\/]"""
+    r"""(?:"?\$\{?CLAUDE_PROJECT_DIR\}?"?|\$env:CLAUDE_PROJECT_DIR|\$\{?workspaceFolder\}?)[\\/]"""
 )
+_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(|\|\|")
 _MERGED_READERS: dict[str, Callable[[list, str], HookDocument]] = {
     "claude": _from_claude_hook_entries,
     "codex": _from_claude_hook_entries,
@@ -79,6 +80,18 @@ def event_portability(event: str) -> tuple[list[str], list[str]]:
     return sorted(native), sorted(targets - native)
 
 
+def _replace_command_token(command: str, token: str, replacement: str) -> str:
+    """Replace one argv token in *command* without reserialising the whole string."""
+    pattern = r"(?<!\S)" + re.escape(token) + r"(?!\S)"
+    return re.sub(pattern, replacement, command, count=1)
+
+
+def _rewrite_project_dir_refs(command: str) -> tuple[str, bool]:
+    """Rewrite project-dir variables to ``./`` without reserialising shell syntax."""
+    new_command, count = _PROJECT_DIR_VARS.subn("./", command)
+    return new_command, count > 0
+
+
 def _rewrite_script_tokens(
     command: str,
     finding: Finding,
@@ -88,21 +101,21 @@ def _rewrite_script_tokens(
     event: str,
 ) -> str:
     """Normalise project-dir variables; optionally copy in-project scripts."""
+    new_command, project_changed = _rewrite_project_dir_refs(command)
+    if project_changed:
+        result.transform(
+            f"hooks.{event}.command", "project-dir variable rewritten to a relative path"
+        )
+    shell_meta = bool(_SHELL_META_RE.search(new_command))
     try:
-        argv = shlex.split(command, posix=True)
+        argv = shlex.split(new_command, posix=True)
     except ValueError:
-        return command
-    changed = False
+        return new_command
     for index, token in enumerate(argv):
-        stripped = _PROJECT_DIR_VARS.sub("", token)
-        if stripped != token:
-            argv[index] = f"./{stripped}" if not stripped.startswith(("./", "/")) else stripped
-            changed = True
-            result.transform(
-                f"hooks.{event}.command", "project-dir variable rewritten to a relative path"
-            )
-        candidate = ctx.project_root / argv[index]
-        if ctx.include_hook_scripts and not Path(argv[index]).is_absolute() and candidate.is_file():
+        if shell_meta:
+            continue
+        candidate = ctx.project_root / token
+        if ctx.include_hook_scripts and not Path(token).is_absolute() and candidate.is_file():
             try:
                 ensure_path_within(
                     candidate.resolve(strict=False), ctx.project_root.resolve(strict=False)
@@ -114,9 +127,9 @@ def _rewrite_script_tokens(
                 continue
             text = candidate.read_bytes()
             if b"\x00" not in text:
-                verdict = SecurityGate.scan_text(
-                    text.decode("utf-8", errors="ignore"), candidate.name
-                )
+                script_text = text.decode("utf-8", errors="ignore")
+                refuse_credentials(script_text)
+                verdict = SecurityGate.scan_text(script_text, candidate.name)
                 if verdict.should_block:
                     raise ConvertError("hook script blocked by the security scan")
             scripts_dir = dest_dir / "scripts"
@@ -128,23 +141,24 @@ def _rewrite_script_tokens(
 
                 shutil.copy2(candidate, target)
                 result.written.append(target)
-            argv[index] = f"./scripts/{script_name}"
-            changed = True
+            new_command = _replace_command_token(new_command, token, f"./scripts/{script_name}")
             result.transform(f"hooks.{event}.command", "script copied into .apm/hooks/scripts/")
-        elif (
-            not Path(argv[index]).is_absolute()
-            and argv[index].startswith("./")
-            and not candidate.exists()
-        ):
+        elif not Path(token).is_absolute() and token.startswith("./") and not candidate.exists():
             result.transform(
                 f"hooks.{event}.command", "referenced script not found in project", "warning"
             )
-        elif Path(argv[index]).is_absolute() or argv[index].startswith("~"):
-            if index == 0 or argv[index].endswith((".sh", ".py", ".ps1", ".js")):
+        elif Path(token).is_absolute() or token.startswith("~"):
+            if index == 0 or token.endswith((".sh", ".py", ".ps1", ".js")):
                 result.transform(
                     f"hooks.{event}.command", "machine-local script path is not portable", "warning"
                 )
-    return shlex.join(argv) if changed else command
+    if shell_meta and ctx.include_hook_scripts:
+        result.transform(
+            f"hooks.{event}.command",
+            "shell operators present; hook script paths not rewritten",
+            "warning",
+        )
+    return new_command
 
 
 def _unique_script_name(scripts_dir: Path, candidate: Path, content: bytes) -> str:
@@ -208,36 +222,42 @@ class HooksConverter:
 
         for container, per_event in documents.items():
             hooks_out: dict[str, list] = {}
-            for event, document in sorted(per_event.items()):
+            for _native_event, document in sorted(per_event.items()):
                 entries = _document_to_entries(document)
+                canonical = document.bindings[0].event if document.bindings else _native_event
                 for entry in entries:
                     if not isinstance(entry, dict):
                         continue
                     for handler in entry.get("hooks", []):
                         if isinstance(handler, dict) and handler.get("command"):
                             handler["command"] = _rewrite_script_tokens(
-                                str(handler["command"]), finding, dest.parent, ctx, result, event
+                                str(handler["command"]),
+                                finding,
+                                dest.parent,
+                                ctx,
+                                result,
+                                canonical,
                             )
                         if isinstance(handler, dict) and handler.get("type") not in (
                             None,
                             "command",
                         ):
                             result.transform(
-                                f"hooks.{event}.type",
+                                f"hooks.{canonical}.type",
                                 f"'{handler.get('type')}' handlers only fire on {tool}",
                                 "warning",
                             )
                 if entries:
-                    hooks_out[event] = entries
-                native, passthrough = event_portability(event)
+                    hooks_out.setdefault(canonical, []).extend(entries)
+                native, passthrough = event_portability(canonical)
                 if passthrough:
                     where = (
                         f"native on {', '.join(native)}" if native else "not native on any target"
                     )
                     result.transform(
-                        f"hooks.{event}",
+                        f"hooks.{canonical}",
                         f"{where}; passed through unmapped on {', '.join(passthrough)}",
-                        "info" if event in CANONICAL_EVENTS else "warning",
+                        "info" if canonical in CANONICAL_EVENTS else "warning",
                     )
             if not hooks_out:
                 continue

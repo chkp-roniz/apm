@@ -22,7 +22,7 @@ from apm_cli.hook_contract import HookContractError, parse_hook_source
 from apm_cli.integration.skill_integrator import normalize_skill_name
 from apm_cli.primitives.parser import parse_primitive_file, parse_skill_file
 from apm_cli.utils.console import STATUS_SYMBOLS
-from apm_cli.utils.path_security import ensure_path_within, safe_rmtree
+from apm_cli.utils.path_security import PathTraversalError, ensure_path_within, safe_rmtree
 
 from .converters import (
     CONVERTERS,
@@ -149,6 +149,30 @@ class WritePlan:
         return [i for i in self.items if i.decision in ("write", "refresh")]
 
 
+def _guard_adopt_paths(root: Path, apm_dir: Path, manifest: Path) -> None:
+    """Reject symlinked or out-of-root adopt targets before any write."""
+    root_resolved = root.resolve(strict=False)
+    for label, path in ((".apm", apm_dir), ("manifest", manifest)):
+        if path.is_symlink():
+            raise ConvertError(f"{label} is a symlink; refusing to write")
+        if path.exists():
+            try:
+                ensure_path_within(path.resolve(strict=False), root_resolved)
+            except PathTraversalError as exc:
+                raise ConvertError(f"{label} escapes the project root") from exc
+
+
+def _resolve_dest(
+    finding: Finding, provenance: ImportSources, allocator: NameAllocator
+) -> tuple[str, bool]:
+    """Pick a destination, reusing provenance for the same source when possible."""
+    existing = provenance.dest_for_source(finding.display_path)
+    if existing is not None:
+        allocator.remember(existing, finding.tool)
+        return existing, False
+    return _destination(finding, allocator)
+
+
 def _source_rel(finding: Finding) -> PurePosixPath:
     path = PurePosixPath(finding.display_path)
     parts = list(path.parts)
@@ -183,11 +207,16 @@ def plan_write(
                 plan.skipped.append((finding, f"identical content already imported from {holder}"))
                 continue
         try:
-            dest_rel, renamed = _destination(finding, allocator)
+            dest_rel, renamed = _resolve_dest(finding, provenance, allocator)
         except ConvertError as exc:
             plan.skipped.append((finding, str(exc)))
             continue
-        decision = provenance.decide(dest_rel, apm_dir / dest_rel, source_hash)
+        decision = provenance.decide(
+            dest_rel,
+            apm_dir / dest_rel,
+            source_hash,
+            source=finding.display_path,
+        )
         item = WriteItem(finding, converter.id, dest_rel, decision, source_hash)
         if renamed:
             item.error = None
@@ -397,6 +426,14 @@ def _dedupe_mcp(
     return list(by_name.values()), notes
 
 
+def _change_key(item: WriteItem) -> str:
+    if item.finding.kind is HarnessKind.MCP_SERVER:
+        payload = item.finding.payload if isinstance(item.finding.payload, dict) else {}
+        name = payload.get("name")
+        return f"apm.yml#dependencies.mcp/{name}" if name else item.dest_rel
+    return item.dest_rel
+
+
 def _build_write_dict(
     *,
     status: str,
@@ -411,10 +448,15 @@ def _build_write_dict(
         "status": status,
         "written": written,
         "failed": [{"path": i.finding.display_path, "reason": i.error} for i in failures],
-        "skipped": [{"path": f.display_path, "reason": r} for f, r in plan.skipped],
+        "skipped": [{"path": f.display_path, "reason": r} for f, r in plan.skipped]
+        + [
+            {"path": i.finding.display_path, "reason": i.decision}
+            for i in plan.items
+            if i.decision not in ("write", "refresh")
+        ],
         "manifest": manifest_notes,
         "changes": {
-            i.dest_rel: [c.to_dict() for c in i.result.changes]
+            _change_key(i): [c.to_dict() for c in i.result.changes]
             for i in to_write
             if i.result is not None
         },
@@ -502,7 +544,12 @@ def _log_plan(
     if mcp_items:
         info(f"Will add {len(mcp_items)} MCP server(s) to {manifest_name}:")
         for item in mcp_items:
-            tree_item(item.finding.display_path)
+            summary = summarize_changes(item.result.changes) if item.result else ""
+            suffix = f" [{summary}]" if summary else ""
+            tree_item(f"{item.finding.display_path}{suffix}")
+            for change in item.result.changes if item.result else ():
+                if change.severity == "warning":
+                    tree_item(f"    {change.path}: {change.reason}")
     if manifest_notes:
         info(f"{manifest_name} changes:")
         for note in manifest_notes:
@@ -592,6 +639,25 @@ def run_write(
     register_builtin_converters()
     apm_dir = root / ".apm" if scope is Scope.PROJECT else root / USER_APM_DIR
     manifest = (root if scope is Scope.PROJECT else apm_dir) / APM_YML_FILENAME
+    try:
+        _guard_adopt_paths(root, apm_dir, manifest)
+    except ConvertError as exc:
+        if fmt != "text":
+            _emit_machine_write_report(
+                report,
+                fmt,
+                _build_write_dict(
+                    status="failed",
+                    written=[],
+                    failures=[],
+                    plan=WritePlan(apm_dir=apm_dir),
+                    manifest_notes=[str(exc)],
+                    to_write=[],
+                ),
+            )
+        else:
+            logger.error(str(exc))
+        return 1
     provenance = ImportSources.load(apm_dir)
     allocator = NameAllocator(apm_dir)
     plan = plan_write(report, apm_dir, provenance, allocator)
@@ -647,13 +713,32 @@ def run_write(
             create_config = _get_default_config(root.name if scope is Scope.PROJECT else "user")
             if targets:
                 create_config["targets"] = targets
-        preview_notes = mcp_notes + apply_manifest_delta(
-            manifest,
-            targets=targets,
-            mcp_entries=mcp_entries,
-            create_config=create_config,
-            dry_run=True,
-        )
+        preview_notes: list[str] = []
+        try:
+            preview_notes = mcp_notes + apply_manifest_delta(
+                manifest,
+                targets=targets,
+                mcp_entries=mcp_entries,
+                create_config=create_config,
+                dry_run=True,
+            )
+        except Exception as exc:
+            if fmt != "text":
+                _emit_machine_write_report(
+                    report,
+                    fmt,
+                    _build_write_dict(
+                        status="failed",
+                        written=[],
+                        failures=failures,
+                        plan=plan,
+                        manifest_notes=[f"manifest preparation failed ({type(exc).__name__})"],
+                        to_write=to_write,
+                    ),
+                )
+            else:
+                logger.error(f"Manifest preparation failed ({type(exc).__name__})")
+            return 1
         if fmt == "text":
             _describe_plan(
                 plan,

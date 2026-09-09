@@ -200,6 +200,10 @@ class NameAllocator:
         self._by_content[key] = rel
         return None
 
+    def remember(self, dest_rel: str, tool: str) -> None:
+        """Reserve *dest_rel* from a prior import without allocating a new name."""
+        self._taken[dest_rel] = tool
+
     def within(self, dest: Path) -> Path:
         return ensure_path_within(dest, self.apm_dir)
 

@@ -121,8 +121,40 @@ def _scrub_args(args: Any, server: str, result: ConvertResult) -> list[str]:
     if not isinstance(args, list):
         return []
     out: list[str] = []
-    for index, item in enumerate(args):
-        text = str(item)
+    index = 0
+    while index < len(args):
+        text = str(args[index])
+        if text.startswith("--") and "=" in text:
+            flag, _, value = text.partition("=")
+            key = flag.lstrip("-")
+            if looks_like_secret(key, value) or looks_like_secret(None, value):
+                placeholder = placeholder_name(server, f"ARG{index}")
+                out.append(f"{flag}={placeholder}")
+                result.redacted(
+                    f"args[{index}]",
+                    "credential-looking flag assignment replaced by a placeholder",
+                )
+            else:
+                out.append(text)
+            index += 1
+            continue
+        if (
+            text.startswith("--")
+            and index + 1 < len(args)
+            and not str(args[index + 1]).startswith("-")
+        ):
+            value = str(args[index + 1])
+            key = text.lstrip("-")
+            if looks_like_secret(key, value) or looks_like_secret(None, value):
+                out.append(text)
+                placeholder = placeholder_name(server, f"ARG{index + 1}")
+                out.append(placeholder)
+                result.redacted(
+                    f"args[{index + 1}]",
+                    "credential-looking flag value replaced by a placeholder",
+                )
+                index += 2
+                continue
         if _has_env_placeholder(text):
             out.append(_translate_env_placeholder(text))
         elif (
@@ -136,6 +168,7 @@ def _scrub_args(args: Any, server: str, result: ConvertResult) -> list[str]:
             )
         else:
             out.append(text)
+        index += 1
     return out
 
 
