@@ -222,6 +222,11 @@ requirements:
     section: "5.2"
     conformance_class: consumer
     notes: "source-cased materialization_repo_url remains non-identity metadata and drives rollback-safe, collision-closed materialization/link spelling"
+  - id: req-lk-023
+    keyword: MUST
+    section: "5.3"
+    conformance_class: consumer
+    notes: "user-scope local primitive deployment records first and later deployed output paths plus canonical hash envelopes in the user-scope lockfile self fields; discovered native sources alone are not recorded"
   - id: req-pl-001
     keyword: MUST
     section: "6.1"
@@ -458,6 +463,22 @@ requirements:
     section: "8.1"
     conformance_class: consumer
     notes: "declared Plugin component copying canonicalizes its non-symlink source root and prunes the current operation's materialization subtree"
+  - id: req-pr-008
+    keyword: MUST
+    section: "8.2.1"
+    conformance_class: consumer
+    notes: "optional native import previews source path, source tool or format, primitive type, and scope without mutation; apply requires explicit consent, preserves source bytes, reports non-preserving conversions, and grants no executable approval"
+  - id: req-pr-009
+    keyword: MUST
+    section: "8.2.2"
+    conformance_class: consumer
+    oracle: tests/fixtures/spec-conformance/optional-import/native-hook-gemini.json
+    notes: "optional native hook import preserves supported event aliases, handler order, matchers, timeout duration, and shell text outside rewritten script spans; unknown or unsupported hooks are explicit nonconversions with no hook output"
+  - id: req-pr-010
+    keyword: MUST
+    section: "8.2.3"
+    conformance_class: consumer
+    notes: "optional native MCP import ownership is selected-scope and runtime-bound; explicit empty target ownership is authoritative, legacy inference requires exact canonical config equality, and outside-scope or failed legacy evidence adds no inferred ownership"
   - id: req-sc-001
     keyword: MUST
     section: "10.4"

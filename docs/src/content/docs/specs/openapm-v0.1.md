@@ -136,7 +136,7 @@ between the companion corpus and the implementation.
 
 ### 1.3 Document conventions
 
-- OpenAPM v0.1 carries **122 normative statements (117 MUST, 5 SHOULD)** indexed in
+- OpenAPM v0.1 carries **126 normative statements (121 MUST, 5 SHOULD)** indexed in
   [Appendix C](#appendix-c-index-of-normative-statements).
 - All on-disk files defined by this specification are **YAML 1.2**
   parsed under the safe subset defined in
@@ -1110,6 +1110,20 @@ This isolation prevents the orphan-cleanup logic of one dependency
 from removing files attributed to another (see
 [Section 10.7](#107-unverified-content-cleanup-file-integrators)).
 
+<a id="req-lk-023"></a>
+**[req-lk-023]** A conforming **consumer** implementation that
+supports local primitive installation in user scope MUST, after a
+successful non-preview deployment of its own local primitives to that
+scope, persist the deployed output paths and their canonical hash
+envelopes in that scope's `local_deployed_files` and
+`local_deployed_file_hashes`, including on the first such install. The
+virtual self-entry remains in-memory only and MUST NOT be written back
+to YAML. The consumer MUST NOT record source-native paths solely
+because they were discovered for optional import. Hash calculation
+remains governed by [req-lk-012](#req-lk-012) and
+[req-lk-016](#req-lk-016); later target reconciliation remains
+governed by [req-lk-020](#req-lk-020).
+
 ### 5.4 Lockfile versions (1, 2) and bumping rules
 
 This specification defines two lockfile schema versions, `"1"` and
@@ -1300,7 +1314,8 @@ This section's normative statements are:
   [req-lk-014](#req-lk-014), [req-lk-015](#req-lk-015),
   [req-lk-016](#req-lk-016), [req-lk-017](#req-lk-017),
   [req-lk-019](#req-lk-019), [req-lk-020](#req-lk-020),
-  [req-lk-021](#req-lk-021), [req-lk-022](#req-lk-022).
+  [req-lk-021](#req-lk-021), [req-lk-022](#req-lk-022),
+  [req-lk-023](#req-lk-023).
 - Consumer (SHOULD): [req-lk-007](#req-lk-007),
   [req-lk-018](#req-lk-018).
 
@@ -2417,6 +2432,66 @@ project's own `.apm/` directory and MUST be of the form
 `dependency:<name>` for primitives sourced from a resolved
 dependency.
 
+#### 8.2.1 Optional native import
+
+<a id="req-pr-008"></a>
+**[req-pr-008]** A conforming **consumer** implementation that offers
+import of target-native agent configuration into OpenAPM sources MUST
+present a non-mutating preview before any persistent import state is
+written. For each selected import source, the preview MUST identify the
+source path, source tool or native format, primitive type, and selected
+project or user installation scope. Applying the import MUST require
+explicit consent, either by interactive confirmation or by a documented
+invocation opt-in. The consumer MUST preserve the original source bytes
+and MUST expose unsupported or non-preserving conversions before
+interactive approval or, with invocation opt-in, before persistent import
+writes; it MUST NOT silently label a conversion as lossless. Discovery
+and conversion MUST NOT execute imported commands, hooks, or MCP server
+definitions. Import itself MUST NOT be treated as target deployment or
+as executable approval; the install and executable-admission gates in
+this specification remain unchanged. A consumer that does not offer
+native import has no obligation under this requirement.
+
+#### 8.2.2 Native hook import
+
+<a id="req-pr-009"></a>
+**[req-pr-009]** A conforming **consumer** implementation that offers
+native import under [req-pr-008](#req-pr-008) and elects to convert a
+target-native hook input into OpenAPM hook sources MUST preserve, for
+each supported native hook mapping, the declared event association
+using documented equivalent aliases, handler order, matchers, timeout
+duration through unit conversions, and the shell program outside any
+script-reference span the consumer rewrites. The consumer MUST document
+the supported native hook mappings in its implementation profile or
+companion documentation. An unknown or unrepresentable format, a
+non-command handler, or an unsupported path expression MUST produce an
+explicit nonconversion for the affected hook; the consumer MUST NOT emit
+OpenAPM hook output or auxiliary script copies for that hook. This
+requirement does not require every target-native hook format to be
+supported and does not claim runtime semantic equivalence across
+harnesses.
+
+#### 8.2.3 Native MCP ownership admission
+
+<a id="req-pr-010"></a>
+**[req-pr-010]** A conforming **consumer** implementation that offers
+native MCP import under [req-pr-008](#req-pr-008) and assesses whether
+target-native MCP entries are owned by the current OpenAPM package MUST
+bind that assessment to the selected installation scope and runtime. A
+recorded target-specific ownership map for one runtime is authoritative
+only for that runtime; the consumer MUST NOT treat it as ownership for a
+same-name entry from another runtime. An explicit empty ownership map is
+authoritative and MUST NOT trigger legacy inference. Only when no
+target-specific ownership map is recorded for the selected scope MAY
+legacy inference confer ownership, and only when the native entry's
+configuration is exactly equal to the canonical rendering of a recorded
+OpenAPM baseline for that same runtime; matching by name alone is
+insufficient. Before reading any current or legacy target-native config
+path, the consumer MUST authorize that path against the selected scope
+and MUST NOT inspect outside-scope paths. Failed, absent, unknown, or
+unauthorized legacy evidence MUST NOT add an inferred ownership claim.
+Preview MUST NOT persist ownership or take over native MCP state.
+
 ### 8.3 Priority and conflict resolution
 
 <a id="req-pr-002"></a>
@@ -2845,7 +2920,9 @@ without a spec revision. The current matrix is in the companion
 ### 8.7 Conformance requirements (primitives and targets)
 
 - Consumer: [req-pr-001](#req-pr-001), [req-pr-002](#req-pr-002),
-  [req-pr-003](#req-pr-003), [req-tg-001](#req-tg-001),
+  [req-pr-003](#req-pr-003), [req-pr-008](#req-pr-008),
+  [req-pr-009](#req-pr-009), [req-pr-010](#req-pr-010),
+  [req-tg-001](#req-tg-001),
   [req-tg-002](#req-tg-002), [req-tg-003](#req-tg-003),
   [req-tg-004](#req-tg-004), [req-tg-005](#req-tg-005),
   [req-tg-006](#req-tg-006), [req-tg-007](#req-tg-007),
@@ -3234,6 +3311,7 @@ every stored hash, foreclosing algorithm-ambiguity attacks.
 | 19| Executable deployment in non-interactive contexts    | [req-sc-014](#req-sc-014)                                          | Consumer-default  |
 | 20| Source-only or symlinked package content materialization | [req-sc-015](#req-sc-015)                                      | Consumer-default  |
 | 21| Native plugin namespace collision or ownership-ledger loss | [req-tg-013](#req-tg-013)                                      | Consumer-default  |
+| 22| Native import mutation, executable bypass, or ownership takeover | [req-pr-008](#req-pr-008): preview, consent, no execution or executable approval; [req-pr-009](#req-pr-009): explicit hook nonconversion; [req-pr-010](#req-pr-010): selected-scope, runtime-bound MCP ownership | Consumers offering native import |
 
 ### 10.12 Publisher provenance and attestations (reserved for v0.2)
 
@@ -3472,6 +3550,7 @@ conformance statement identifying:
 [req-lk-017](#req-lk-017), [req-lk-018](#req-lk-018) (SHOULD),
 [req-lk-019](#req-lk-019), [req-lk-020](#req-lk-020),
 [req-lk-021](#req-lk-021), [req-lk-022](#req-lk-022),
+[req-lk-023](#req-lk-023),
 [req-rs-001](#req-rs-001), [req-rs-002](#req-rs-002),
 [req-rs-003](#req-rs-003), [req-rs-004](#req-rs-004),
 [req-rs-005](#req-rs-005), [req-rs-006](#req-rs-006),
@@ -3484,6 +3563,8 @@ conformance statement identifying:
 [req-pr-001](#req-pr-001), [req-pr-002](#req-pr-002),
 [req-pr-003](#req-pr-003), [req-tg-001](#req-tg-001),
 [req-pr-006](#req-pr-006), [req-pr-007](#req-pr-007),
+[req-pr-008](#req-pr-008), [req-pr-009](#req-pr-009),
+[req-pr-010](#req-pr-010),
 [req-tg-002](#req-tg-002), [req-tg-003](#req-tg-003),
 [req-tg-004](#req-tg-004), [req-tg-005](#req-tg-005),
 [req-tg-006](#req-tg-006), [req-tg-007](#req-tg-007),
@@ -3701,7 +3782,12 @@ tests/fixtures/spec-conformance/
     semver-dialect.json
   source-plan/
     req-sc-015.json
+  optional-import/
+    native-hook-gemini.json
 ```
+
+The `optional-import/native-hook-gemini.json` fixture is the
+[req-pr-009](#req-pr-009) oracle for supported native hook import.
 
 Conformance-suite expansion (additional fixtures for archive
 path-traversal, merge-table cases, etc.) tracks here in subsequent
@@ -3886,6 +3972,7 @@ renumbering of conformance classes.
 | [req-lk-020](#req-lk-020)                | MUST    | 5.2     | consumer    |
 | [req-lk-021](#req-lk-021)                | MUST    | 5.2     | consumer    |
 | [req-lk-022](#req-lk-022)                | MUST    | 5.2     | consumer    |
+| [req-lk-023](#req-lk-023)                | MUST    | 5.3     | consumer    |
 | [req-pl-001](#req-pl-001)                | MUST    | 6.1     | governance  |
 | [req-pl-002](#req-pl-002)                | MUST    | 6.2     | governance  |
 | [req-pl-003](#req-pl-003)                | MUST    | 6.4     | governance  |
@@ -3928,6 +4015,9 @@ renumbering of conformance classes.
 | [req-pr-005](#req-pr-005)                | SHOULD  | 7.8     | producer    |
 | [req-pr-006](#req-pr-006)                | MUST    | 8.1     | consumer    |
 | [req-pr-007](#req-pr-007)                | MUST    | 8.1     | consumer    |
+| [req-pr-008](#req-pr-008)                | MUST    | 8.2.1   | consumer    |
+| [req-pr-009](#req-pr-009)                | MUST    | 8.2.2   | consumer    |
+| [req-pr-010](#req-pr-010)                | MUST    | 8.2.3   | consumer    |
 | [req-tg-001](#req-tg-001)                | MUST    | 8.4     | consumer    |
 | [req-tg-002](#req-tg-002)                | MUST    | 8.5     | consumer    |
 | [req-tg-003](#req-tg-003)                | MUST    | 8.5     | consumer    |
@@ -3961,7 +4051,7 @@ renumbering of conformance classes.
 | [req-cf-001](#req-cf-001)                | MUST    | 12.5    | consumer    |
 | [req-cf-002](#req-cf-002)                | MUST    | 12.3    | consumer    |
 
-**Total normative statements: 122** (117 MUST, 5 SHOULD).
+**Total normative statements: 126** (121 MUST, 5 SHOULD).
 
 ---
 
@@ -4011,6 +4101,7 @@ renumbering of conformance classes.
 | 0.1.38  | 2026-09-01 | Defensive amendment of [req-lk-005] (no new normative statement; count remains 120 (115 MUST, 5 SHOULD)): `generated_at` is optional advisory metadata, new lockfiles omit it by default, and later writes preserve an existing omission unless explicitly configured otherwise. |
 | 0.1.39  | 2026-09-01 | Spec-citation fold for user-scoped direct MCP target selection (closes #2548 Mode-B silent-extension gate). Added [req-tg-014] (Section 8.5.8, consumer MUST): explicit selection, the user-scope manifest, configured user default, and user-scope runtime discovery form one precedence chain; project-only signals cannot constrain final discovery; and a selected set with no user-capable runtime fails before user manifest, lockfile, or target-config mutation. Section 8.7, Section 11.3.2, and Appendix C updated. Statement count: 120 -> 121 (116 MUST, 5 SHOULD). |
 | 0.1.40  | 2026-09-07 | Spec-citation fold for dependency-policy identity casing in PR #2706. Added [req-pl-018] (Section 6.3.1, governance MUST) and extended [req-rs-016] clause (3): dependency allow, deny, and exact require operands use the documented per-host repository case rule, while registry-sourced repository coordinates are case-insensitive regardless of host; case normalization is ASCII-only, is bounded identically on both operands, stops at recursive-glob ambiguity, and does not cross virtual-path, ref, registry-name, MCP-name, unmanaged-path, or case-sensitive host/source boundaries; deny precedence is unchanged. Defined the policy glob grammar, documented byte-exact Section 6.4 merge behavior, and added the threat mapping. Classified this as a non-breaking correction of previously unspecified evaluation behavior under Section 9.2: existing lowercase workarounds remain matching; on registry sources and hosts documented as case-insensitive, case-variant allow entries can newly match, deny entries can newly enforce, and exact require entries can newly be satisfied, so those policies should be re-audited. Sections 1.3, 6.3.1, 6.3.5, 6.4, 6.5, 6.9, 7.2, 9.2, 10.8, 10.11, 11.2, and 11.3.4, Appendix C, and conformance coverage updated. Statement count: 121 -> 122 (117 MUST, 5 SHOULD). |
+| 0.1.41  | 2026-09-09 | Editorial-patch amendment for optional native import in PR #2857. Added [req-pr-008] (Section 8.2.1, consumer MUST), [req-pr-009] (Section 8.2.2, consumer MUST), and [req-pr-010] (Section 8.2.3, consumer MUST): consumers that choose to offer native import preview sources without mutation, require explicit apply consent, preserve source bytes, report unsupported or non-preserving hook conversions, do not execute imported commands or MCP definitions, and assess native MCP ownership only from selected-scope, target-specific, runtime-bound evidence. Added [req-lk-023] (Section 5.3, consumer MUST): consumers that support user-scope local primitive deployment record first and later deployed output paths plus canonical hash envelopes in the user-scope lockfile self fields. These are optional capability obligations and do not require any consumer to implement a native importer, mandate a vendor mapping table, widen [req-tg-006](#req-tg-006) or [req-tg-013](#req-tg-013), or change [req-lk-020](#req-lk-020) reconciliation. Sections 1.3, 5.3, 5.7, 8.2.1, 8.2.2, 8.2.3, 8.7, 10.11, 11.3.2, Appendix C, and the informative manifest updated. Statement count: 122 -> 126 (121 MUST, 5 SHOULD). |
 
 Errata (none at publication).
 

@@ -29,7 +29,7 @@ Repository-coordinate segments are case-insensitive for `github.com`, GitHub Ent
 | Class | Active | Skipped | Xfail | Unbound |
 |-------|-------:|--------:|------:|--------:|
 | Producer | 12 | 0 | 0 | 0 |
-| Consumer | 90 | 1 | 0 | 0 |
+| Consumer | 94 | 1 | 0 | 0 |
 | Registry | 1 | 0 | 0 | 0 |
 | Governance | 18 | 0 | 0 | 0 |
 
@@ -63,6 +63,7 @@ Repository-coordinate segments are case-insensitive for `github.com`, GitHub Ent
 | [req-lk-020](docs/src/content/docs/specs/openapm-v0.1.md#req-lk-020) | MUST | 5.2 | consumer | active | 3 | - |
 | [req-lk-021](docs/src/content/docs/specs/openapm-v0.1.md#req-lk-021) | MUST | 5.2 | consumer | active | 2 | - |
 | [req-lk-022](docs/src/content/docs/specs/openapm-v0.1.md#req-lk-022) | MUST | 5.2 | consumer | active | 4 | - |
+| [req-lk-023](docs/src/content/docs/specs/openapm-v0.1.md#req-lk-023) | MUST | 5.3 | consumer | active | 1 | - |
 | [req-mf-001](docs/src/content/docs/specs/openapm-v0.1.md#req-mf-001) | MUST | 4.1 | producer | active | 1 | - |
 | [req-mf-002](docs/src/content/docs/specs/openapm-v0.1.md#req-mf-002) | MUST | 4.1 | producer | active | 1 | - |
 | [req-mf-003](docs/src/content/docs/specs/openapm-v0.1.md#req-mf-003) | MUST | 4.1 | producer | active | 1 | - |
@@ -112,6 +113,9 @@ Repository-coordinate segments are case-insensitive for `github.com`, GitHub Ent
 | [req-pr-005](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-005) | SHOULD | 7.8 | producer | active | 1 | - |
 | [req-pr-006](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-006) | MUST | 8.1 | consumer | active | 1 | - |
 | [req-pr-007](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-007) | MUST | 8.1 | consumer | active | 1 | - |
+| [req-pr-008](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-008) | MUST | 8.2.1 | consumer | active | 5 | - |
+| [req-pr-009](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-009) | MUST | 8.2.2 | consumer | active | 4 | tests/fixtures/spec-conformance/optional-import/native-hook-gemini.json |
+| [req-pr-010](docs/src/content/docs/specs/openapm-v0.1.md#req-pr-010) | MUST | 8.2.3 | consumer | active | 8 | - |
 | [req-rg-001](docs/src/content/docs/specs/openapm-v0.1.md#req-rg-001) | MUST | 11.3.3 | registry | active | 1 | - |
 | [req-rs-001](docs/src/content/docs/specs/openapm-v0.1.md#req-rs-001) | MUST | 7.2 | consumer | active | 1 | - |
 | [req-rs-002](docs/src/content/docs/specs/openapm-v0.1.md#req-rs-002) | MUST | 7.3 | consumer | active | 1 | - |

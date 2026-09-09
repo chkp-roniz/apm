@@ -1,0 +1,41 @@
+{
+  "_comment": "Exercises req-pr-009 under the req-pr-008 optional native import boundary: supported Gemini hook input preserves event alias, handler order, matcher, timeout unit conversion, and only the script-reference span in the shell command is rewritten.",
+  "source_tool": "gemini",
+  "source": {
+    "hooks": {
+      "BeforeTool": [
+        {
+          "matcher": "Write",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "python \"$CLAUDE_PROJECT_DIR/scripts/check.py\" && echo \"$HOME\"",
+              "timeout": 2500
+            }
+          ]
+        }
+      ],
+      "PreToolUse": [
+        {
+          "matcher": "Read",
+          "hooks": [
+            {
+              "command": "echo second"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "expected_neutral": {
+    "event": "PreToolUse",
+    "matchers": ["Write", "Read"],
+    "commands": ["python \"./scripts/check.py\" && echo \"$HOME\"", "echo second"],
+    "timeout_seconds": 2.5
+  },
+  "expected_native": {
+    "event": "BeforeTool",
+    "matchers": ["Write", "Read"],
+    "timeout_milliseconds": 2500
+  }
+}

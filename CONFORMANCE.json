@@ -313,6 +313,17 @@
       ]
     },
     {
+      "conformance_class": "consumer",
+      "id": "req-lk-023",
+      "keyword": "MUST",
+      "section": "5.3",
+      "status": "active",
+      "test_count": 1,
+      "tests": [
+        "tests/spec_conformance/test_optional_import_reqs.py::test_user_scope_local_deploy_persists_only_actual_outputs_and_hashes"
+      ]
+    },
+    {
       "conformance_class": "producer",
       "id": "req-mf-001",
       "keyword": "MUST",
@@ -863,6 +874,54 @@
       "test_count": 1,
       "tests": [
         "tests/spec_conformance/test_resolution_reqs.py::test_root_declared_plugin_component_excludes_generated_staging_tree"
+      ]
+    },
+    {
+      "conformance_class": "consumer",
+      "id": "req-pr-008",
+      "keyword": "MUST",
+      "section": "8.2.1",
+      "status": "active",
+      "test_count": 5,
+      "tests": [
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_import_preview_identifies_user_scope_without_mutation",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_import_preview_is_non_mutating_and_identifies_sources",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_import_requires_opt_in_and_discloses_warnings_before_consent[interactive-cancel]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_import_requires_opt_in_and_discloses_warnings_before_consent[no-tty-refusal]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_import_success_preserves_sources_and_does_not_deploy_or_approve"
+      ]
+    },
+    {
+      "conformance_class": "consumer",
+      "id": "req-pr-009",
+      "keyword": "MUST",
+      "oracle": "tests/fixtures/spec-conformance/optional-import/native-hook-gemini.json",
+      "section": "8.2.2",
+      "status": "active",
+      "test_count": 4,
+      "tests": [
+        "tests/spec_conformance/test_optional_import_reqs.py::test_native_hook_import_preserves_alias_order_matcher_timeout_and_script_spans",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_unrepresentable_native_hooks_nonconvert_without_writes_or_execution[dynamic-script]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_unrepresentable_native_hooks_nonconvert_without_writes_or_execution[non-command-handler]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_unrepresentable_native_hooks_nonconvert_without_writes_or_execution[unknown-format]"
+      ]
+    },
+    {
+      "conformance_class": "consumer",
+      "id": "req-pr-010",
+      "keyword": "MUST",
+      "section": "8.2.3",
+      "status": "active",
+      "test_count": 8,
+      "tests": [
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_explicit_empty_target_map_disables_legacy_fallback",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_failed_absent_unknown_or_unauthorized_legacy_evidence_does_not_infer[absent]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_failed_absent_unknown_or_unauthorized_legacy_evidence_does_not_infer[failed]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_failed_absent_unknown_or_unauthorized_legacy_evidence_does_not_infer[unauthorized]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_failed_absent_unknown_or_unauthorized_legacy_evidence_does_not_infer[unknown]",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_import_ownership_is_runtime_and_scope_bound",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_legacy_inference_requires_exact_canonical_runtime_baseline",
+        "tests/spec_conformance/test_optional_import_reqs.py::test_mcp_scanner_authorizes_current_path_before_native_read"
       ]
     },
     {
@@ -1426,7 +1485,7 @@
   "spec_version": "v0.1.1",
   "summary_by_class": {
     "consumer": {
-      "active": 90,
+      "active": 94,
       "skipped": 1,
       "unbound": 0,
       "xfail": 0
@@ -1450,5 +1509,5 @@
       "xfail": 0
     }
   },
-  "total_requirements": 122
+  "total_requirements": 126
 }

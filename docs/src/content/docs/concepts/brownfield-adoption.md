@@ -41,13 +41,23 @@ finding cap is not a bound on all filesystem traversal.
 | Markdown agents; Codex TOML agents | `.apm/agents/*.agent.md` | Portable keys retained, vendor keys reported as dropped; OpenCode agents with native `tools` or `permission` policies, or incompatible frontmatter, are reference-only |
 | Markdown commands, Windsurf workflows, Gemini TOML commands | `.apm/prompts/*.prompt.md` | Portable keys retained; vendor fields and argument transformations reported |
 | Skill directories | `.apm/skills/<name>/` | Name normalized; symlinks refused; non-content files filtered |
-| Merged Claude, Codex, Cursor, Gemini, Windsurf, Antigravity hooks; Copilot/Kiro per-file hooks | `.apm/hooks/<allocated-hook-stem>.json` | Command hooks only; canonical events and timeout units; unknown formats, non-command hooks, and unsupported shell forms are reference-only |
+| Merged Claude, Codex, Cursor, Gemini, Windsurf, Antigravity hooks; Copilot/Kiro per-file hooks | `.apm/hooks/<allocated-hook-stem>.json` | Command hooks only; see profile below |
 | MCP client entries | Self-defined `dependencies.mcp` entries | OpenCode native `mcp` entries and command arrays supported; unsupported environment references, including Codex `bearer_token_env_var`, `env_http_headers`, and `env_vars`, are reference-only |
 | Styles, plugin layouts, canvases | None | Reference-only |
 
 Converters report `preserved`, `transformed`, `defaulted`, `dropped`, and
-`redacted` fields with reasons. A hook event passed through unmapped is not a
-promise that another harness executes it. Review each target's output.
+`redacted` fields with reasons.
+
+Native hook import is optional under the [OpenAPM import rules](../../specs/openapm-v0.1/#req-pr-008).
+APM's implementation profile for [native hook import](../../specs/openapm-v0.1/#req-pr-009)
+is the reader in `src/apm_cli/integration/hook_native_formats.py`
+(`read_native_hook_document` and `canonical_hook_event`). It accepts only the
+merged hook documents listed above, with Gemini timeouts converted from
+milliseconds to seconds, plus per-file Copilot hooks and Kiro v1 hook files.
+Conversion preserves supported event aliases, grouping, handler order, matchers,
+and timeout duration; it does not claim universal runtime equivalence. Unknown
+formats, unsupported tools, non-command handlers, and dynamic shell references
+remain reference-only.
 
 ### Activation differs by harness
 
