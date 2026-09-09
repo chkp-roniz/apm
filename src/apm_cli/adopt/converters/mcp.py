@@ -188,11 +188,21 @@ def _scrub_args(args: Any, references: list[str]) -> list[str]:
     out: list[str] = []
     for index, item in enumerate(args):
         text = str(item)
+        previous = str(args[index - 1]) if index else ""
         key, separator, value = text.partition("=")
-        if contains_credential(text) or (
-            _literal_secret(value, key)
-            if separator
-            else _literal_secret(text) and not _looks_like_path_token(text)
+        if (
+            contains_credential(text)
+            or (
+                _literal_secret(value, key)
+                if separator
+                else _literal_secret(text) and not _looks_like_path_token(text)
+            )
+            or (
+                previous.startswith("--")
+                and "=" not in previous
+                and not text.startswith("-")
+                and _literal_secret(text, previous)
+            )
         ):
             raise ConvertError(f"args[{index}]: literal credential has no safe replay conversion")
         if _REFERENCE_RE.search(text):
