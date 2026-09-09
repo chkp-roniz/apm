@@ -15,6 +15,9 @@ OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
 RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
+ROOT_CONTEXT = "src/apm_cli/adopt/converters/root_context.py"
+RULE_CONVERTER = "src/apm_cli/adopt/converters/rules.py"
+COMMAND_CONVERTER = "src/apm_cli/adopt/converters/commands.py"
 
 
 def _scope(facts: FileFacts, name: str) -> Sequence[ast.AST]:
@@ -49,7 +52,7 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     """Require reservations, identity, output sets and hashes at their one owner."""
     facts: dict[str, FileFacts] = {}
     findings: list[Violation] = []
-    for path in (OWNER, MATERIALIZE, ALLOCATOR):
+    for path in (OWNER, MATERIALIZE, ALLOCATOR, ROOT_CONTEXT, RULE_CONVERTER, COMMAND_CONVERTER):
         facts[path], failures = checked_facts(provider, path, RULE_ID, require_python=True)
         findings.extend(failures)
     if findings:
@@ -58,6 +61,108 @@ def check_import_provenance(provider: FactsProvider) -> tuple[Violation, ...]:
     def require(condition: bool, path: str, message: str) -> None:
         if not condition:
             findings.append(violation(RULE_ID, path, message))
+
+    # Import identity's display spelling must not become USER activation. Keep
+    # the decision at the existing semantic Scope and all-file scope owners.
+    root = facts[ROOT_CONTEXT]
+    for name, level, module in (("Scope", 2, "model"), ("ALWAYS_ON", 1, "rules")):
+        bindings = binding_nodes(root.tree_index, name) if root.tree_index else ()
+        require(
+            len(bindings) == 1
+            and isinstance(bindings[0], ast.ImportFrom)
+            and (bindings[0].level, bindings[0].module) == (level, module)
+            and any(alias.name == name and alias.asname is None for alias in bindings[0].names),
+            ROOT_CONTEXT,
+            f"Root context {name} must come from its canonical owner",
+        )
+    convert_root = _scope(root, "RootContextConverter.convert")
+    activation = [
+        node
+        for node in convert_root
+        if isinstance(node, ast.Assign)
+        and any(ast.unparse(target) == "metadata['applyTo']" for target in node.targets)
+    ]
+    gates = [
+        node
+        for node in convert_root
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.BoolOp)
+        and isinstance(node.test.op, ast.And)
+        and ast.unparse(node.test.values[0]) == "finding.scope is not Scope.USER"
+    ]
+    require(
+        len(gates) == 1
+        and len(activation) == 2
+        and any(node in gates[0].body for node in activation)
+        and any(
+            node in gates[0].orelse and ast.unparse(node.value) == "ALWAYS_ON"
+            for node in activation
+        ),
+        ROOT_CONTEXT,
+        "USER root activation must use ALWAYS_ON, never its presentation-only display path",
+    )
+    for path, function_name in (
+        (ROOT_CONTEXT, "RootContextConverter.convert"),
+        (RULE_CONVERTER, "RulesConverter.convert"),
+        (COMMAND_CONVERTER, "CommandsConverter.convert"),
+    ):
+        converter = facts[path]
+        tree = converter.tree_index
+        function = tree.function(function_name) if tree else None
+        statements = function.body if isinstance(function, ast.FunctionDef) else ()
+        nodes = _scope(converter, function_name)
+        for name in ("read_text", "refuse_credentials"):
+            bindings = binding_nodes(tree, name) if tree else ()
+            require(
+                len(bindings) == 1
+                and isinstance(bindings[0], ast.ImportFrom)
+                and (bindings[0].level, bindings[0].module) == (1, "base")
+                and any(alias.name == name and alias.asname is None for alias in bindings[0].names),
+                path,
+                f"Original source admission must use canonical {name}",
+            )
+        reads = [
+            node
+            for node in statements
+            if _assigned_call(
+                (node,), "text", "read_text", ("finding.abs_path", "ctx.limits.max_file_bytes")
+            )
+        ]
+        screens = [
+            node
+            for node in statements
+            if isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and ast.unparse(node.value) == "refuse_credentials(text)"
+        ]
+        edits = tuple(
+            call
+            for name in ("parse_markdown", "_from_gemini_toml", "strip_managed_section")
+            for call in _calls(nodes, name)
+        )
+        require(
+            len(reads) == len(screens) == 1
+            and bool(edits)
+            and reads[0].lineno < screens[0].lineno
+            and all(screens[0].lineno < call.lineno for call in edits)
+            and not any(
+                isinstance(node, ast.Assign)
+                and any(ast.unparse(target) == "text" for target in node.targets)
+                and reads[0].lineno < node.lineno < screens[0].lineno
+                for node in nodes
+            ),
+            path,
+            "Screen the bounded ORIGINAL source before parsing or lossy edits",
+        )
+        if path != ROOT_CONTEXT:
+            require(
+                all(
+                    call.args and ast.unparse(call.args[0]) == "f'frontmatter.field[{index}]'"
+                    for call in _calls(nodes, "result.drop")
+                ),
+                path,
+                "Dropped metadata diagnostics must use ordinals, never untrusted key names",
+            )
 
     materialize = facts[MATERIALIZE]
     index = materialize.tree_index

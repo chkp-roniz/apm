@@ -28,6 +28,11 @@ _MAX_BYTES = 1024 * 1024
 _ROOT_DEST = ".apm/instructions/claude-root.instructions.md"
 _SKILL_SOURCE = ".claude/skills/asset-demo"
 _SKILL_DEST = ".apm/skills/asset-demo"
+_METADATA_SOURCES = (
+    pytest.param(".claude/rules/style.md", "instructions/style.instructions.md", id="rule"),
+    pytest.param(".claude/commands/fix.md", "prompts/fix.prompt.md", id="markdown-command"),
+    pytest.param(".gemini/commands/fix.toml", "prompts/fix.prompt.md", id="toml-command"),
+)
 
 
 @pytest.fixture
@@ -38,6 +43,10 @@ def source_cli(tmp_path: Path) -> tuple[Path, dict[str, str], ApmLifecycleRunner
     project.mkdir()
     env = isolated.subprocess_env()
     env["APM_E2E_TESTS"] = "1"
+    # Keep the network guard first, then this checkout (also true in mutation snapshots).
+    env["PYTHONPATH"] = os.pathsep.join(
+        (env["PYTHONPATH"], str(Path(__file__).resolve().parents[3] / "src"))
+    )
     runner = ApmLifecycleRunner(
         (sys.executable, "-c", "from apm_cli.cli import cli; cli()"),
         timeout_seconds=60,
@@ -81,6 +90,95 @@ def _assert_no_leak(result: CommandResult, project: Path) -> None:
     for path in outputs:
         if path.is_file():
             assert _TOKEN.encode("ascii") not in path.read_bytes(), path.name
+
+
+def _metadata_source(path: str, fields: list[tuple[str, str]], comment: str = "") -> str:
+    """Build native source bytes, including metadata that conversion will discard."""
+    if path.endswith(".toml"):
+        return (
+            f"# {comment}\n"
+            + "".join(f'{key} = "{value}"\n' for key, value in fields)
+            + 'prompt = "Keep useful notes."\n'
+        )
+    return (
+        f"---\n# {comment}\n"
+        + "".join(f"{key}: {value}\n" for key, value in fields)
+        + "---\nKeep useful notes.\n"
+    )
+
+
+@pytest.mark.parametrize("fmt", ["text", "json", "yaml"])
+@pytest.mark.parametrize(("relative", "destination"), _METADATA_SOURCES)
+@pytest.mark.parametrize("placement", ["key", "value", "comment"])
+def test_cli_refuses_original_metadata_credentials(
+    source_cli: tuple[Path, dict[str, str], ApmLifecycleRunner],
+    fmt: str,
+    relative: str,
+    destination: str,
+    placement: str,
+) -> None:
+    """Refuse original bytes, not only the metadata/body surviving a lossy conversion."""
+    project, _, _ = source_cli
+    fields = [("description", "Safe description")]
+    fields.append(
+        (_TOKEN if placement == "key" else "vendor_key", _TOKEN if placement == "value" else "safe")
+    )
+    source = write(
+        project / relative,
+        _metadata_source(relative, fields, _TOKEN if placement == "comment" else ""),
+    )
+    original = source.read_bytes()
+
+    result = _apply(source_cli, fmt)
+
+    _assert_no_leak(result, project)
+    assert result.returncode == 1
+    assert source.read_bytes() == original
+    assert not (project / ".apm" / destination).exists()
+    assert not list((project / ".apm").rglob("*.md"))
+    if fmt != "text":
+        report = _write_report(result, fmt)
+        assert report["status"] == "partial"
+        assert report["written"] == []
+        assert len(report["failed"]) == 1
+        assert report["failed"][0]["path"] == relative
+        assert "possible github-token" in report["failed"][0]["reason"]
+        assert "redact it first" in report["failed"][0]["reason"]
+        assert report["items"][0]["error"] == report["failed"][0]["reason"]
+    else:
+        assert "github-token" in result.stdout + result.stderr
+        assert "redact it first" in " ".join((result.stdout + result.stderr).split())
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+@pytest.mark.parametrize(("relative", "destination"), _METADATA_SOURCES)
+def test_cli_dropped_metadata_uses_ordinals(
+    source_cli: tuple[Path, dict[str, str], ApmLifecycleRunner],
+    fmt: str,
+    relative: str,
+    destination: str,
+) -> None:
+    """Unknown keys below credential thresholds must not become diagnostic values."""
+    project, _, _ = source_cli
+    keys = ["private_key_identifier", "another_private_identifier"]
+    fields = [(keys[0], "private-value"), ("description", "Safe description"), (keys[1], "safe")]
+    source = write(project / relative, _metadata_source(relative, fields))
+    original = source.read_bytes()
+
+    result = _apply(source_cli, fmt)
+
+    assert result.returncode == 0
+    report = _write_report(result, fmt)
+    assert report["status"] == "complete"
+    assert report["failed"] == []
+    dropped = [c for c in report["items"][0]["changes"] if c["action"] == "dropped"]
+    assert [c["path"] for c in dropped] == ["frontmatter.field[1]", "frontmatter.field[3]"]
+    for value in [*keys, "private-value"]:
+        assert value not in result.stdout + result.stderr
+    imported = (project / ".apm" / destination).read_text(encoding="utf-8")
+    assert "Keep useful notes." in imported
+    assert "Safe description" in imported
+    assert source.read_bytes() == original
 
 
 @pytest.mark.parametrize("fmt", ["json", "yaml", "text"])

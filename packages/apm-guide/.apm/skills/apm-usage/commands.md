@@ -10,11 +10,8 @@
 
 ### Import existing configuration
 
-`--global` confines discovery to the selected home scope; externally configured
-MCP locations are uninspected inventory, not implicitly approved input.
-Use the exact generated environment names in the plan, including their stable
-identity suffixes. A failed staging cleanup can leave completed imports committed;
-inspect `write.reason`, `write.written`, and `write.recovery` before retrying.
+`--global` confines discovery to the selected home scope; external MCP
+locations remain uninspected.
 
 ```bash
 apm init --discover
@@ -22,29 +19,29 @@ apm init --discover --apply
 apm install --target cursor
 ```
 
-Checkpoint first. Inspect the prepared import and per-server setup warnings
-before consenting; export required variables before installation. Unlike
-ordinary `init --yes`, discovery apply merges the manifest. `--yes` bypasses
-only confirmation; actionable non-TTY apply requires it.
+Checkpoint first. Review exclusions and per-server warnings; export exact
+generated environment names, including identity suffixes, before installation.
+Apply merges the manifest and preserves originals. `--yes` skips only
+confirmation; actionable non-TTY apply requires it.
 
-Unsupported OpenCode agent tools/permissions, Codex native MCP environment
-references, and unknown hook formats or unsupported shell forms are
-reference-only. Detected URL/argument credentials are refused, not converted
-to placeholders. Only supported MCP env/header fields support placeholder
-conversion; screening is not exhaustive.
+Follow [support and selective cutover](https://microsoft.github.io/apm/concepts/brownfield-adoption/);
+do not blanket-delete originals or use `--force`.
+Then edit `.apm/` and `apm.yml`; explicit re-import protects local edits and
+source reservations.
 
-Apply preserves originals. Later source-target installation can rewrite rules,
-skip agent collisions, and retain unmarked root files. Activation varies by
-harness. Reconcile verified duplicates selectively, without blanket deletion
-or `--force`; then edit `.apm/` and `apm.yml`. Explicit re-import protects
-modified outputs and retains source reservations; it is not ongoing sync.
-
-JSON/YAML execution emits one stdout document; apply plans/prompts use stderr.
-Inspect `write.status`, per-source `write.items`, and `write.recovery`:
+JSON/YAML emits one stdout document; plans/prompts use stderr.
 `complete`/`cancelled` exit 0; `partial`/`refused`/`failed` exit 1.
-Partial apply may commit eligible items; failed recovery is not assumed complete.
-See the [init contract](https://microsoft.github.io/apm/reference/cli/init/#consent-and-results)
-and [support/cutover guide](https://microsoft.github.io/apm/concepts/brownfield-adoption/).
+Partial apply may commit eligible items.
+
+Before retrying failures, inspect `write.reason` and the
+[init receipt](https://microsoft.github.io/apm/reference/cli/init/#consent-and-results).
+With `write.state_known: false`, final write effects are uncertain:
+`written: []` certifies no outputs, not no remaining writes;
+`mcp_imported` and `manifest_updated` are `null`.
+Reconcile conservative `affected` candidates, not guaranteed existing/changed
+paths. Inspect `recovery_directory`, retained after incomplete rollback or
+cleanup failure. Cleanup failure keeps known committed outputs/counters;
+complete rollback reports `manifest_updated: false`, `mcp_imported: 0`.
 
 ## Dependency management
 

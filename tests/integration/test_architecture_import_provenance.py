@@ -23,9 +23,15 @@ OWNER = "src/apm_cli/adopt/provenance.py"
 MATERIALIZE = "src/apm_cli/adopt/materialize.py"
 RENDER = "src/apm_cli/adopt/render.py"
 ALLOCATOR = "src/apm_cli/adopt/converters/base.py"
+ROOT_CONTEXT = "src/apm_cli/adopt/converters/root_context.py"
+RULE_CONVERTER = "src/apm_cli/adopt/converters/rules.py"
+COMMAND_CONVERTER = "src/apm_cli/adopt/converters/commands.py"
+IMPORT_PATHS = (OWNER, MATERIALIZE, ALLOCATOR, ROOT_CONTEXT, RULE_CONVERTER, COMMAND_CONVERTER)
 GUARD = "scripts/architecture_linter/checks/contracts_import_provenance.py"
 BEHAVIOR = "tests/unit/adopt/test_import_provenance.py"
 PERFORMANCE = "tests/unit/adopt/test_provenance_performance.py"
+SOURCE_SCOPE = "tests/unit/adopt/test_source_scope_followups.py"
+SOURCE_SECRETS = "tests/unit/adopt/test_source_secret_followups.py"
 BOUNDARY = "tests/integration/test_architecture_import_provenance.py"
 
 
@@ -212,11 +218,51 @@ def test_import_output_owner_mutations_on_disk(
             "entries = [path]",
             id="bounded-admission",
         ),
+        pytest.param(
+            ROOT_CONTEXT,
+            'metadata["applyTo"] = ALWAYS_ON',
+            'metadata["applyTo"] = f"{nested_dir.as_posix()}/**"',
+            id="user-root-display-activation",
+        ),
+        pytest.param(
+            ROOT_CONTEXT,
+            "finding.scope is not Scope.USER",
+            "True",
+            id="user-root-semantic-gate",
+        ),
+        pytest.param(
+            ROOT_CONTEXT,
+            "from .rules import ALWAYS_ON",
+            'ALWAYS_ON = "**"',
+            id="user-root-scope-owner",
+        ),
+        *[
+            pytest.param(
+                path,
+                "refuse_credentials(text)",
+                "pass",
+                id=f"original-source-screen-{label}",
+            )
+            for path, label in (
+                (ROOT_CONTEXT, "root"),
+                (RULE_CONVERTER, "rule"),
+                (COMMAND_CONVERTER, "commands"),
+            )
+        ],
+        *[
+            pytest.param(
+                path,
+                'f"frontmatter.field[{index}]"',
+                'f"frontmatter.{key}"',
+                id=f"metadata-key-diagnostic-{label}",
+            )
+            for path, label in ((RULE_CONVERTER, "rule"), (COMMAND_CONVERTER, "commands"))
+        ],
     ],
 )
 def test_import_provenance_mutations_on_disk(tmp_path: Path, path: str, old: str, new: str) -> None:
     """An actual edited file must trigger this guard, not an unrelated failure."""
-    paths = (OWNER, MATERIALIZE, ALLOCATOR)
+    paths = IMPORT_PATHS
     for relative in paths:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -258,7 +304,7 @@ def test_import_provenance_mutations_on_disk(tmp_path: Path, path: str, old: str
 )
 def test_indexed_provenance_mutations_on_disk(tmp_path: Path, old: str, new: str) -> None:
     """The optimized caller must retain owner delegation and real witness consumption."""
-    paths = (OWNER, MATERIALIZE, ALLOCATOR)
+    paths = IMPORT_PATHS
     for relative in paths:
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +372,49 @@ def test_indexed_provenance_mutations_on_disk(tmp_path: Path, old: str, new: str
             BOUNDARY + "::test_import_provenance_mutations_on_disk[reserve-recorded-destinations]",
             id="boundary-assertion",
         ),
+        pytest.param(
+            ROOT_CONTEXT,
+            "finding.scope is not Scope.USER",
+            "True",
+            SOURCE_SCOPE + "::test_native_user_root_context_is_all_file_scope[.claude/CLAUDE.md]",
+            id="behavior-user-root-semantic-gate",
+        ),
+        *[
+            pytest.param(
+                path,
+                "refuse_credentials(text)",
+                "pass",
+                SOURCE_SECRETS
+                + f"::test_cli_refuses_original_metadata_credentials[key-{label}-json]",
+                id=f"behavior-original-source-screen-{label}",
+            )
+            for path, label in (
+                (RULE_CONVERTER, "rule"),
+                (COMMAND_CONVERTER, "markdown-command"),
+                (COMMAND_CONVERTER, "toml-command"),
+            )
+        ],
+        *[
+            pytest.param(
+                path,
+                'f"frontmatter.field[{index}]"',
+                'f"frontmatter.{key}"',
+                SOURCE_SECRETS + f"::test_cli_dropped_metadata_uses_ordinals[{label}-json]",
+                id=f"behavior-metadata-key-diagnostic-{label}",
+            )
+            for path, label in (
+                (RULE_CONVERTER, "rule"),
+                (COMMAND_CONVERTER, "markdown-command"),
+                (COMMAND_CONVERTER, "toml-command"),
+            )
+        ],
+        pytest.param(
+            GUARD,
+            "if not condition:",
+            "if False and not condition:",
+            BOUNDARY + "::test_import_provenance_mutations_on_disk[user-root-display-activation]",
+            id="boundary-user-root-activation",
+        ),
     ],
 )
 def test_provenance_mutation_kills_on_disk(
@@ -349,8 +438,13 @@ def test_provenance_mutation_kills_on_disk(
         "tests/unit/__init__.py",
         "tests/unit/adopt/__init__.py",
         "tests/unit/adopt/conftest.py",
+        "tests/utils/__init__.py",
+        "tests/utils/apm_lifecycle_runner.py",
+        "tests/utils/isolated_apm_environment.py",
         BEHAVIOR,
         PERFORMANCE,
+        SOURCE_SCOPE,
+        SOURCE_SECRETS,
         BOUNDARY,
     ):
         target = sandbox / relative

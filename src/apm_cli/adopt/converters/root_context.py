@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 
 from apm_cli.utils.path_security import PathTraversalError, ensure_path_within
 
-from ..model import Finding
+from ..model import Finding, Scope
 from . import ConvertContext, ConvertError, ConvertResult
 from .base import emit_markdown, read_text, refuse_credentials
 from .rules import ALWAYS_ON
@@ -90,7 +90,12 @@ class RootContextConverter:
         metadata = {"description": f"Project instructions imported from {basename}"}
         result.default("frontmatter.description", "generated from source filename")
         nested_dir = PurePosixPath(finding.display_path).parent
-        if str(nested_dir) not in ("", ".") and not str(nested_dir).startswith("."):
+        # USER roots are fixed context entries; ~/ is presentation, not activation scope.
+        if (
+            finding.scope is not Scope.USER
+            and str(nested_dir) not in ("", ".")
+            and not str(nested_dir).startswith(".")
+        ):
             metadata["applyTo"] = f"{nested_dir.as_posix()}/**"
             result.transform("frontmatter.applyTo", "nested context file scoped to its directory")
         else:

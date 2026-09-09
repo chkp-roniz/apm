@@ -29,33 +29,32 @@ def _make_adapter(tmp_path: Path) -> VSCodeClientAdapter:
 
 
 class TestGetConfigPath:
-    def test_creates_vscode_dir_and_returns_path(self, tmp_path):
+    def test_config_path_does_not_create_directory(self, tmp_path):
         adapter = _make_adapter(tmp_path)
         path = adapter.get_config_path()
         vscode_dir = tmp_path / ".vscode"
-        assert vscode_dir.exists()
-        assert path.endswith("mcp.json")
+        assert not vscode_dir.exists()
+        assert Path(path) == vscode_dir / "mcp.json"
 
-    def test_directory_creation_failure_logs_warning(self, tmp_path):
+    def test_config_path_does_not_probe_or_write(self, tmp_path):
         adapter = _make_adapter(tmp_path)
         logger = MagicMock()
         with (
-            patch.object(Path, "exists", return_value=False),
-            patch.object(Path, "mkdir", side_effect=PermissionError("denied")),
+            patch.object(Path, "exists", side_effect=AssertionError("unexpected probe")),
+            patch.object(Path, "mkdir", side_effect=AssertionError("unexpected write")),
         ):
             path = adapter.get_config_path(logger=logger)
-        logger.warning.assert_called_once()
-        assert "mcp.json" in path
+        assert Path(path) == tmp_path / ".vscode/mcp.json"
+        assert logger.mock_calls == []
 
-    def test_directory_creation_failure_prints_when_no_logger(self, tmp_path, capsys):
+    def test_directory_creation_failure_is_reported_at_write(self, tmp_path, capsys):
         adapter = _make_adapter(tmp_path)
-        with (
-            patch.object(Path, "exists", return_value=False),
-            patch.object(Path, "mkdir", side_effect=PermissionError("denied")),
-        ):
-            adapter.get_config_path()
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denied")):
+            assert not adapter.update_config({"servers": {}})
         captured = capsys.readouterr()
-        assert "Warning" in captured.out or "Could not" in captured.out
+        assert "Error updating VSCode MCP configuration" in captured.out
+        assert "denied" in captured.out
+        assert not (tmp_path / ".vscode").exists()
 
     def test_existing_vscode_dir_not_recreated(self, tmp_path):
         (tmp_path / ".vscode").mkdir()
@@ -71,7 +70,6 @@ class TestGetConfigPath:
 
 class TestUpdateConfig:
     def test_writes_config_successfully(self, tmp_path):
-        (tmp_path / ".vscode").mkdir()
         adapter = _make_adapter(tmp_path)
         result = adapter.update_config({"servers": {}})
         assert result is True

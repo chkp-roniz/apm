@@ -14,7 +14,7 @@ from apm_cli.integration.command_integrator import _PRESERVED_COMMAND_KEYS
 
 from ..model import Finding
 from . import ConvertContext, ConvertError, ConvertResult
-from .base import derive_description, emit_markdown, read_markdown, read_text
+from .base import derive_description, emit_markdown, parse_markdown, read_text, refuse_credentials
 
 _GEMINI_ARGS_PREFIX = re.compile(r"^Arguments:\s*\{\{args\}\}\s*\n+")
 _CLAUDE_ONLY = (("!`", "inline shell (Claude-only syntax)"), ("@", "file reference"))
@@ -58,25 +58,26 @@ class CommandsConverter:
     def convert(self, finding: Finding, dest: Path, *, ctx: ConvertContext) -> ConvertResult:
         if finding.abs_path is None:
             raise ConvertError("no source path")
+        text = read_text(finding.abs_path, ctx.limits.max_file_bytes)
+        # Screen both native syntaxes before parsing or filtering unknown keys.
+        refuse_credentials(text)
         result = ConvertResult()
         if finding.abs_path.suffix == ".toml":
-            meta, body = _from_gemini_toml(
-                read_text(finding.abs_path, ctx.limits.max_file_bytes), result
-            )
+            meta, body = _from_gemini_toml(text, result)
         else:
-            meta, body = read_markdown(finding.abs_path, ctx.limits.max_file_bytes, result)
+            meta, body = parse_markdown(text, result)
             for marker, label in _CLAUDE_ONLY:
                 if marker == "@" and not re.search(r"(^|\s)@[\w./-]+", body):
                     continue
                 if marker in body:
                     result.keep("body", f"{label} kept verbatim")
         out: dict[str, Any] = {}
-        for key, value in meta.items():
+        for index, (key, value) in enumerate(meta.items(), 1):
             if key in _PRESERVED_COMMAND_KEYS and value not in (None, ""):
                 out[key] = value
                 result.keep(f"frontmatter.{key}")
             elif key not in _PRESERVED_COMMAND_KEYS:
-                result.drop(f"frontmatter.{key}", "not in the portable command key set")
+                result.drop(f"frontmatter.field[{index}]", "not in the portable command key set")
         if not out.get("description"):
             derived = derive_description(body)
             if derived:

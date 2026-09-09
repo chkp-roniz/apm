@@ -53,33 +53,29 @@ def _context7_optional_env_server_info() -> dict:
 
 
 class TestGetConfigPath:
-    def test_creates_vscode_dir_and_returns_path(self, tmp_path):
+    def test_native_config_read_does_not_create_directory(self, tmp_path):
         adapter = _make_adapter(tmp_path)
         path = adapter.get_config_path()
-        vscode_dir = tmp_path / ".vscode"
-        assert vscode_dir.exists()
-        assert path.endswith("mcp.json")
+        assert adapter.get_native_server_configs() == {}
+        assert not Path(path).parent.exists()
+        assert Path(path).name == "mcp.json"
 
-    def test_directory_creation_failure_logs_warning(self, tmp_path):
+    def test_directory_creation_failure_logs_at_write_boundary(self, tmp_path):
         adapter = _make_adapter(tmp_path)
         logger = MagicMock()
-        with (
-            patch.object(Path, "exists", return_value=False),
-            patch.object(Path, "mkdir", side_effect=PermissionError("denied")),
-        ):
-            path = adapter.get_config_path(logger=logger)
-        logger.warning.assert_called_once()
-        assert "mcp.json" in path
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denied")):
+            assert adapter.update_config({"servers": {}}, logger=logger) is False
+        logger.error.assert_called_once()
+        assert "denied" in logger.error.call_args.args[0]
+        logger.warning.assert_not_called()
 
-    def test_directory_creation_failure_prints_when_no_logger(self, tmp_path, capsys):
+    def test_getter_is_silent_when_parent_cannot_be_created(self, tmp_path, capsys):
         adapter = _make_adapter(tmp_path)
-        with (
-            patch.object(Path, "exists", return_value=False),
-            patch.object(Path, "mkdir", side_effect=PermissionError("denied")),
-        ):
-            adapter.get_config_path()
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denied")) as mkdir:
+            assert Path(adapter.get_config_path()).parent == tmp_path / ".vscode"
+        mkdir.assert_not_called()
         captured = capsys.readouterr()
-        assert "Warning" in captured.out or "Could not" in captured.out
+        assert captured.out == captured.err == ""
 
     def test_existing_vscode_dir_not_recreated(self, tmp_path):
         (tmp_path / ".vscode").mkdir()

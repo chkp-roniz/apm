@@ -14,7 +14,7 @@ from apm_cli.utils.patterns import normalize_apply_to
 
 from ..model import Finding
 from . import ConvertContext, ConvertError, ConvertResult
-from .base import derive_description, emit_markdown, read_markdown
+from .base import derive_description, emit_markdown, parse_markdown, read_text, refuse_credentials
 
 _NEUTRAL_KEYS = frozenset({"description", "applyTo"})
 ALWAYS_ON = "**"
@@ -157,8 +157,11 @@ class RulesConverter:
     def convert(self, finding: Finding, dest: Path, *, ctx: ConvertContext) -> ConvertResult:
         if finding.abs_path is None:
             raise ConvertError("no source path")
+        text = read_text(finding.abs_path, ctx.limits.max_file_bytes)
+        # Screen original bytes before parsing or dropping vendor metadata.
+        refuse_credentials(text)
         result = ConvertResult()
-        meta, body = read_markdown(finding.abs_path, ctx.limits.max_file_bytes, result)
+        meta, body = parse_markdown(text, result)
         mapper = _BY_FORMAT.get(finding.format_id or "")
         if mapper is None:
             result.skipped_reason = "native rule format has no preserving import contract"
@@ -174,9 +177,9 @@ class RulesConverter:
             "fileMatchPattern",
             "trigger",
         }
-        for key in meta:
+        for index, key in enumerate(meta, 1):
             if key not in consumed:
-                result.drop(f"frontmatter.{key}", "vendor-only key has no APM equivalent")
+                result.drop(f"frontmatter.field[{index}]", "vendor-only key has no APM equivalent")
         if not out.get("description"):
             derived = derive_description(body)
             if derived:

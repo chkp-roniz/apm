@@ -140,6 +140,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Generated footer owner loses the one canonical builder definition.",
     ),
     MutationCase(
+        guard_id="contracts-tooling-import-output",
+        rule_id="contracts-tooling-import-output",
+        path="src/apm_cli/adopt/materialize.py",
+        old="from .render import log_plan as _log_plan",
+        new="from .render import render as _log_plan",
+        intent="Importer stops delegating plan diagnostics to the canonical logger renderer.",
+    ),
+    MutationCase(
         guard_id="contracts-tooling-import-provenance",
         rule_id="contracts-tooling-import-provenance",
         path="src/apm_cli/adopt/materialize.py",

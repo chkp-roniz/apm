@@ -125,8 +125,9 @@ def test_empty_completion_is_not_a_write_success(project: Path) -> None:
     assert not (project / ".apm").exists()
 
 
+@pytest.mark.parametrize("fmt", ["text", "json", "yaml"])
 def test_cleanup_failure_names_retained_changes_and_directory(
-    project: Path, monkeypatch: pytest.MonkeyPatch
+    project: Path, monkeypatch: pytest.MonkeyPatch, fmt: str
 ) -> None:
     write(project / ".claude/rules/test.md", "Committed rule.\n")
     original_cleanup = materialize.safe_rmtree
@@ -137,10 +138,133 @@ def test_cleanup_failure_names_retained_changes_and_directory(
         return original_cleanup(path, *args, **kwargs)
 
     monkeypatch.setattr(materialize, "safe_rmtree", deny_staging)
-    result = _apply("--yes")
+    result = _apply("--yes", "--format", fmt)
     assert result.exit_code == 1, result.output
-    assert "remain committed" in result.stdout
-    assert "instructions/test.instructions.md" in result.stdout
     staging = next(project.glob(".apm-adopt-*"))
-    assert staging.name in result.stdout
     assert (project / ".apm/instructions/test.instructions.md").exists()
+    if fmt == "text":
+        assert "remain committed" in result.stdout
+        assert "instructions/test.instructions.md" in result.stdout
+        assert staging.name in result.stdout
+    else:
+        report = json.loads(result.stdout) if fmt == "json" else yaml.safe_load(result.stdout)
+        receipt = report["write"]
+        assert receipt["status"] == "failed"
+        assert receipt["recovery"] == "not-needed"
+        assert receipt["state_known"] is True
+        assert receipt["written"] == ["instructions/test.instructions.md"]
+        assert receipt["manifest_updated"] is True
+        assert receipt["mcp_imported"] == 0
+        assert receipt["affected"] == []
+        assert receipt["recovery_directory"] == staging.name
+
+
+@pytest.mark.parametrize("fmt", ["text", "json", "yaml"])
+@pytest.mark.parametrize("deny_restore", [False, True], ids=["restored", "incomplete"])
+@pytest.mark.parametrize("global_scope", [False, True], ids=["project", "user"])
+def test_late_provenance_failure_reports_durable_or_unknown_state(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fmt: str,
+    deny_restore: bool,
+    global_scope: bool,
+) -> None:
+    """Actual writes precede the injected fault; deleted outputs are not durable writes."""
+    project = Path.home() if global_scope else project
+    scope_args = ["--global"] if global_scope else []
+    display_prefix = "~/" if global_scope else ""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    source = write(project / ".claude/rules/test.md", "Original rule.\n")
+    assert _apply("--yes", "--format", "json", *scope_args).exit_code == 0
+    output = project / ".apm/instructions/test.instructions.md"
+    manifest = project / ".apm/apm.yml" if global_scope else project / "apm.yml"
+    provenance = project / ".apm/.import-sources.json"
+    before = {path: path.read_bytes() for path in (output, manifest, provenance)}
+    source.write_text("Upstream replacement.\n", encoding="utf-8")
+    write(
+        project / (".claude.json" if global_scope else ".mcp.json"),
+        json.dumps({"mcpServers": {"late": {"command": "printf", "args": ["inert"]}}}),
+    )
+    original_save = materialize.ImportSources.save
+    observed: list[str] = []
+
+    def fail_after_save(self):
+        original_save(self)
+        assert b"Upstream replacement." in output.read_bytes()
+        assert manifest.read_bytes() != before[manifest]
+        assert provenance.read_bytes() != before[provenance]
+        observed.append("saved")
+        raise OSError("late provenance failure")
+
+    def fail_restore(*args, **kwargs):
+        observed.append("restore-denied")
+        raise PermissionError("destination restore denied")
+
+    monkeypatch.setattr(materialize.ImportSources, "save", fail_after_save)
+    if deny_restore:
+        monkeypatch.setattr(materialize, "_restore_destination", fail_restore)
+    result = _apply("--yes", "--format", fmt, *scope_args)
+    assert result.exit_code == 1, result.output
+    assert observed == (["saved", "restore-denied"] if deny_restore else ["saved"])
+    if deny_restore:
+        assert not output.exists(), "rollback removed the output before restoration failed"
+        assert manifest.read_bytes() != before[manifest]
+        assert provenance.read_bytes() != before[provenance]
+        assert yaml.safe_load(manifest.read_text())["dependencies"]["mcp"][0]["name"] == "late"
+        staging = next(project.glob(".apm-adopt-*"))
+        assert any(
+            path.is_file() and path.read_bytes() == before[output]
+            for path in (staging / ".adopt-backup").iterdir()
+        ), "original bytes must remain in the reported recovery directory"
+    else:
+        assert {path: path.read_bytes() for path in before} == before
+        assert not list(project.glob(".apm-adopt-*"))
+    if fmt == "text":
+        assert f"recovery: {'incomplete' if deny_restore else 'restored'}" in result.stdout
+        assert "remain committed" not in result.stdout
+        if deny_restore:
+            receipt_text = result.stdout.split("Automatic recovery is incomplete;", 1)[1]
+            assert "state is unknown" in receipt_text
+            for path in before:
+                assert display_prefix + path.relative_to(project).as_posix() in receipt_text
+            assert display_prefix + staging.name in receipt_text
+            assert "before retrying" in receipt_text
+        return
+    report = json.loads(result.stdout) if fmt == "json" else yaml.safe_load(result.stdout)
+    receipt = report["write"]
+    assert receipt["status"] == "failed"
+    assert receipt["recovery"] == ("incomplete" if deny_restore else "restored")
+    assert receipt["state_known"] is not deny_restore
+    assert receipt["written"] == [], "never present attempted or removed paths as committed"
+    assert receipt["manifest_updated"] is (None if deny_restore else False)
+    assert receipt["mcp_imported"] == (None if deny_restore else 0)
+    assert receipt["affected"] == (
+        [display_prefix + path.relative_to(project).as_posix() for path in before]
+        if deny_restore
+        else []
+    )
+    assert receipt["recovery_directory"] == (
+        display_prefix + staging.name if deny_restore else None
+    )
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+def test_success_and_noop_keep_known_receipt_contract(project: Path, fmt: str) -> None:
+    write(project / ".claude/rules/test.md", "Import this rule.\n")
+    write(
+        project / ".mcp.json",
+        json.dumps({"mcpServers": {"demo": {"command": "printf", "args": ["inert"]}}}),
+    )
+    for first in (True, False):
+        result = _apply("--yes", "--format", fmt)
+        assert result.exit_code == 0, result.output
+        report = json.loads(result.stdout) if fmt == "json" else yaml.safe_load(result.stdout)
+        receipt = report["write"]
+        assert receipt["status"] == "complete"
+        assert receipt["recovery"] == "not-needed"
+        assert receipt["state_known"] is True
+        assert receipt["written"] == (["instructions/test.instructions.md"] if first else [])
+        assert receipt["manifest_updated"] is first
+        assert receipt["mcp_imported"] == (1 if first else 0)
+        assert receipt["affected"] == []
+        assert receipt["recovery_directory"] is None

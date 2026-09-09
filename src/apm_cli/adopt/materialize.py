@@ -314,8 +314,20 @@ def validate_staged(staging_apm: Path) -> list[str]:
 
 
 def _staged_entries(items: list[WriteItem], staging_apm: Path) -> list[str]:
-    """Destinations plus any extra staged files (e.g. copied hook scripts)."""
+    """Collect unique outputs in order, with directories covering their descendants.
+
+    Exact membership is indexed; coverage costs only each path's ancestor depth,
+    not the number of earlier outputs. Filter after collection so a directory also
+    covers children reported before it by another item.
+    """
     rels: list[str] = []
+    seen: set[str] = set()
+
+    def append(rel: str) -> None:
+        if rel not in seen:
+            seen.add(rel)
+            rels.append(rel)
+
     for item in items:
         if (
             item.error
@@ -324,18 +336,22 @@ def _staged_entries(items: list[WriteItem], staging_apm: Path) -> list[str]:
             or item.finding.kind is HarnessKind.MCP_SERVER
         ):
             continue
-        rels.append(item.dest_rel)
-        auxiliary = staging_apm / "hooks" / Path(item.dest_rel).stem
-        if item.finding.kind is HarnessKind.HOOK and auxiliary.is_dir():
-            rels.append(auxiliary.relative_to(staging_apm).as_posix())
+        append(item.dest_rel)
+        if item.finding.kind is HarnessKind.HOOK:
+            auxiliary = staging_apm / "hooks" / Path(item.dest_rel).stem
+            if auxiliary.is_dir():
+                append(auxiliary.relative_to(staging_apm).as_posix())
         for written in item.result.written:
             try:
                 rel = written.relative_to(staging_apm).as_posix()
             except ValueError:
                 continue
-            if not any(rel == owned or rel.startswith(owned + "/") for owned in rels):
-                rels.append(rel)
-    return rels
+            append(rel)
+    return [
+        rel
+        for rel in rels
+        if not any(parent.as_posix() in seen for parent in PurePosixPath(rel).parents)
+    ]
 
 
 def commit(
@@ -685,8 +701,9 @@ def run_write(
     status = "failed"
     recovery = "not-needed"
     failure_reason: str | None = None
-    committed_mcp = 0
-    manifest_committed = False
+    committed_mcp: int | None = 0
+    manifest_committed: bool | None = False
+    affected: list[str] = []
     commit_txn = _CommitTxn()
     problems: list[str] = []
 
@@ -858,8 +875,20 @@ def run_write(
                 )
                 recovery = "restored"
                 written = []
+                committed_mcp = 0
+                manifest_committed = False
             except Exception:
                 recovery = "incomplete"
+                # Rollback may already have removed/restored some outputs. Neither
+                # the attempted writes nor the success counters certify disk state.
+                # Keep the legacy list shape, but claim no verified durable writes.
+                written = []
+                committed_mcp = None
+                manifest_committed = None
+                affected = [
+                    redactor.path(path, scope)
+                    for path in [*(apm_dir / rel for rel in rels), manifest, provenance.path]
+                ]
             return 1
         status = "partial" if incomplete() else "complete"
         return 1 if incomplete() else 0
@@ -884,6 +913,11 @@ def run_write(
                     "import staging cleanup failed; inspect contained recovery files in "
                     f"{staging_root.name}/"
                 )
+        recovery_directory = (
+            redactor.path(staging_root, scope)
+            if staging_root is not None and (cleanup_failed or recovery == "incomplete")
+            else None
+        )
         if fmt != "text":
             section = _build_write_dict(
                 status=status,
@@ -897,6 +931,11 @@ def run_write(
             section["recovery"] = recovery
             section["mcp_imported"] = committed_mcp
             section["manifest_updated"] = manifest_committed
+            # Additive receipt fields: affected paths are a conservative inspection
+            # set, not an existence claim. Null counters mean unknown, never zero.
+            section["state_known"] = recovery != "incomplete"
+            section["affected"] = affected
+            section["recovery_directory"] = recovery_directory
             if failure_reason:
                 section["reason"] = failure_reason
             _emit_machine_write_report(report, fmt, section)
@@ -917,12 +956,16 @@ def run_write(
                 logger.info("No changes; existing outputs were retained.")
             if written or manifest_committed:
                 _next_steps(logger, report, redactor, scope)
-        if fmt == "text" and status in ("partial", "failed") and (written or manifest_committed):
+        if fmt == "text" and recovery == "incomplete":
             logger.warning(
-                "Automatic recovery is incomplete; inspect these affected outputs:"
-                if recovery == "incomplete"
-                else "These import changes remain committed:"
+                "Automatic recovery is incomplete; output state is unknown. "
+                "Inspect and reconcile these potentially affected paths before retrying:"
             )
+            for path in affected:
+                logger.tree_item(path)
+            logger.tree_item(f"Retained recovery directory: {recovery_directory}/")
+        elif fmt == "text" and status in ("partial", "failed") and (written or manifest_committed):
+            logger.warning("These import changes remain committed:")
             for rel in written:
                 logger.tree_item(f"{apm_display}/{rel}")
             if manifest_committed:

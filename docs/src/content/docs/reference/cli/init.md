@@ -95,12 +95,12 @@ rules, skip colliding agents, and retain unmarked root context files.
 
 ### Consent and results
 
-Preparation shows file changes, per-server warnings and environment setup,
-manifest edits, losses, skips, and refusals before one confirmation.
+Preparation shows file/manifest changes, per-server setup/warnings, losses,
+skips, and refusals before confirmation.
 `--yes` suppresses only that prompt. Actionable non-TTY apply requires `--yes`;
 empty or unchanged plans do not prompt.
-Export the exact placeholder names shown in the plan; generated names include
-a stable identity suffix to keep separate servers and fields independent.
+Export the plan's exact placeholder names; stable identity suffixes
+distinguish servers and fields.
 
 | Outcome | `write.status` | Exit |
 |---|---|---|
@@ -114,25 +114,34 @@ a stable identity suffix to keep separate servers and fields independent.
 Preview returns the inventory without `write`; a completed scan exits `0`
 even when `errors` lists unevaluated paths. It does not certify importability.
 
-For JSON/YAML discovery execution results, stdout contains one document;
-the apply plan and prompt use stderr. Apply adds:
+JSON/YAML emits one stdout document; plans/prompts use stderr. Apply adds:
 
 - `write.items`: per-source `id`, `source`, `tool`, `destination`, `decision`,
   `error`, and `changes`, including separate attribution for MCP servers sharing
   `apm.yml#dependencies.mcp`.
-- `write.written`, `write.failed`, `write.skipped`, `write.manifest`, and
-  `write.changes`: output paths, failures, decisions, manifest notes, and
-  field-change records.
+- `write.failed`, `write.skipped`, `write.manifest`, and `write.changes`:
+  failures, decisions, manifest notes, and field-change records.
 - `write.reason`: failure detail, when present.
+- `write.state_known`: `false` when recovery is incomplete; final write
+  effects are uncertain.
+- `write.written`: confirmed committed primitive/auxiliary output roots,
+  relative to `.apm/`. When state is unknown, `[]` certifies no outputs;
+  it does **not** assert that no writes remain.
 - `write.mcp_imported` and `write.manifest_updated`: committed server count and
-  manifest-change flag, including imports that write no primitive files.
-- `write.recovery`: `not-needed`, `restored`, or `incomplete`. Commit failure
-  attempts to restore files, manifest, and provenance; incomplete recovery
-  retains staging material for inspection.
+  manifest-change flag. Both are `null` when state is unknown; complete
+  rollback reports `0` and `false`, respectively.
+- `write.affected`: conservative inspection list of output, manifest, and
+  provenance paths when state is unknown—not a guarantee that paths exist
+  or changed. Empty when state is known.
+- `write.recovery`: `not-needed`, `restored`, or `incomplete`; commit failure
+  attempts to restore files, manifest, and provenance.
+- `write.recovery_directory`: retained directory after incomplete rollback
+  or staging cleanup failure; otherwise `null`.
 
-Cleanup failure can report `failed` after imports commit, with
-`write.recovery` still `not-needed`. Before retrying, inspect `write.reason`,
-`write.written`, and `write.recovery`; failure does not imply rollback.
+Post-commit cleanup failure reports `failed` with `write.recovery: not-needed`,
+but retains `state_known: true` and confirmed committed outputs/counters.
+Before retrying, inspect the failure reason, potentially affected paths,
+and retained recovery directory; failure does not imply rollback.
 
 `refused` and `cancelled` commit nothing. EOF cancels the prompt in every
 format. Ordinary Click argument/usage errors

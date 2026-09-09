@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 
-from apm_cli.adopt.converters import ConvertContext, ConvertError
+from apm_cli.adopt.converters import ConvertContext, ConvertError, ConvertResult
 from apm_cli.adopt.converters.base import read_markdown
 from apm_cli.adopt.converters.passthrough import CONVERTERS
+from apm_cli.adopt.materialize import WriteItem, _staged_entries
 from apm_cli.adopt.model import Finding, HarnessKind, Importability, Ownership, Scope
 from apm_cli.adopt.provenance import ImportRecord, ImportSources, hash_source, source_identity
 from apm_cli.adopt.redact import Redactor
@@ -55,6 +56,44 @@ def _finding(index: int = 0) -> Finding:
         ownership=Ownership.HOST_OWNED,
         converter_id="passthrough.instruction",
     )
+
+
+def test_staged_entries_have_linear_membership_work(tmp_path: Path) -> None:
+    """Count exact-path comparisons/probes, not wall time; the old scan grows 98x."""
+    counts = []
+    for size in (50, 500):
+        operations = 0
+
+        class CountedPath(str):
+            def __eq__(self, other: object) -> bool:
+                nonlocal operations
+                operations += 1
+                return super().__eq__(other)
+
+            def __hash__(self) -> int:
+                nonlocal operations
+                operations += 1
+                return super().__hash__()
+
+        staging = tmp_path / ".apm"
+        items = []
+        for i in range(size):
+            rel = CountedPath(f"instructions/{i}.instructions.md")
+            items.append(
+                WriteItem(
+                    _finding(i),
+                    "passthrough.instruction",
+                    rel,
+                    "write",
+                    None,
+                    result=ConvertResult(written=[staging / str(rel)]),
+                )
+            )
+        result = _staged_entries(items, staging)
+        counts.append(operations)
+        assert result == [f"instructions/{i}.instructions.md" for i in range(size)]
+    assert counts[0] > 0, "the probe must observe actual membership work"
+    assert counts[1] / counts[0] < 15, counts
 
 
 def _record(finding: Finding, *, identity: str = "", primary: str = "") -> ImportRecord:

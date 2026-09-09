@@ -139,9 +139,6 @@ def _scenario(
     environment["FIXTURE_TOKEN"] = "fixture-value"
     project = isolated.work_root / "project"
     project.mkdir()
-    # Client construction currently creates this empty directory during discovery.
-    # Seed it as brownfield state so no-write assertions isolate the import itself.
-    (project / ".vscode").mkdir()
     runner = ApmLifecycleRunner(
         (str(apm_binary_path),), timeout_seconds=120, scenario_timeout_seconds=600
     )
@@ -338,6 +335,10 @@ def test_brownfield_global_preview_apply_install_rerun(
     apm_home = home / ".apm"
     for rel, content in imports.items():
         assert content in (apm_home / rel).read_bytes(), rel
+    source_context = (apm_home / "instructions/claude-root.instructions.md").read_text(
+        encoding="utf-8"
+    )
+    assert yaml.safe_load(source_context.split("---", 2)[1])["applyTo"] == "**"
     # Skills are committed/provenance-tracked as whole trees, not as SKILL.md alone.
     destinations = {rel.removesuffix("/SKILL.md") for rel in imports}
     assert set(payload["write"]["written"]) == destinations
@@ -365,6 +366,8 @@ def test_brownfield_global_preview_apply_install_rerun(
     assert_preserved()
     assert b"Use type hints." in (home / ".claude/rules/python.md").read_bytes()
     assert b"Hand-authored user context." in (home / ".claude/rules/claude-root.md").read_bytes()
+    deployed_context = (home / ".claude/rules/claude-root.md").read_text(encoding="utf-8")
+    assert yaml.safe_load(deployed_context.split("---", 2)[1])["paths"] == ["**"]
     for rel in (
         ".claude/agents/reviewer.md",
         ".claude/CLAUDE.md",
@@ -415,6 +418,36 @@ def test_brownfield_global_preview_apply_install_rerun(
     )
     assert final_install.returncode == 0, _evidence(final_install)
     assert _full_snapshot(home) == settled, "settled global install must be byte-idempotent"
+    assert_preserved()
+
+    stale = home / ".claude/rules/python.md"
+    edited = home / ".claude/rules/claude-root.md"
+    edited_bytes = edited.read_bytes() + b"\nPreserve this local user edit.\n"
+    edited.write_bytes(edited_bytes)
+    (apm_home / "instructions/python.instructions.md").unlink()
+    (apm_home / "instructions/claude-root.instructions.md").unlink()
+
+    contracted = runner.run(
+        install_args, scenario_id="global-remove-imports", cwd=project, env=environment
+    )
+    assert contracted.returncode == 0, _evidence(contracted)
+    assert not stale.exists(), "removed unchanged user deployment must be cleaned"
+    assert edited.read_bytes() == edited_bytes, "local user edits must survive contraction"
+    assert_preserved()
+    contracted_lock = LockFile.read(lockfile)
+    assert contracted_lock is not None
+    assert ".claude/rules/python.md" not in contracted_lock.local_deployed_files
+    assert ".claude/rules/claude-root.md" in contracted_lock.local_deployed_files
+    assert (
+        contracted_lock.local_deployed_file_hashes[".claude/rules/claude-root.md"]
+        == (lock.local_deployed_file_hashes[".claude/rules/claude-root.md"])
+    ), "preserved edits must retain the original deployment witness"
+    contracted_snapshot = _full_snapshot(home)
+    repeated_contraction = runner.run(
+        install_args, scenario_id="global-repeat-removal", cwd=project, env=environment
+    )
+    assert repeated_contraction.returncode == 0, _evidence(repeated_contraction)
+    assert _full_snapshot(home) == contracted_snapshot
     assert_preserved()
 
 
@@ -780,8 +813,9 @@ def test_brownfield_late_refresh_failure_automatically_restores_snapshot(
     )
 
 
+@pytest.mark.parametrize("fmt", ["text", "json", "yaml"])
 def test_brownfield_incomplete_rollback_reports_recovery_truthfully(
-    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...]
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], fmt: str
 ) -> None:
     """A denied restore is not reported as successful rollback and retains recoverable bytes."""
     project, environment, runner = _scenario(tmp_path, apm_binary_path)
@@ -789,14 +823,43 @@ def test_brownfield_incomplete_rollback_reports_recovery_truthfully(
     old_bytes = Path(environment["W5_REPLACED_PATH"]).read_bytes()
     environment.update(W5_LATE_FAULT="provenance", W5_FAIL_RESTORE="1")
 
-    failed = _apply(_engine_runner(apm_engine_command, _LATE_FAULT_SETUP), project, environment)
+    failed = _engine_runner(apm_engine_command, _LATE_FAULT_SETUP).run(
+        ("init", "--discover", "--apply", "--yes", "--format", fmt),
+        scenario_id=f"incomplete-recovery-{fmt}",
+        cwd=project,
+        env=environment,
+    )
 
     assert "W5: replacement observed before late fault" in failed.stderr, _evidence(failed)
     assert "W5: automatic restore attempted" in failed.stderr, _evidence(failed)
     assert failed.returncode == 1, _evidence(failed)
-    payload = _machine(failed)
-    assert payload["write"]["status"] == "failed"
-    assert payload["write"]["recovery"] == "incomplete"
+    affected = {
+        ".apm/instructions/python.instructions.md",
+        "apm.yml",
+        ".apm/.import-sources.json",
+    }
+    recovery_dirs = list(project.glob(".apm-adopt-*"))
+    assert len(recovery_dirs) == 1
+    recovery_dir = recovery_dirs[0]
+    assert recovery_dir.is_dir() and not recovery_dir.is_symlink()
+    assert not Path(environment["W5_REPLACED_PATH"]).exists()
+    manifest = yaml.safe_load((project / "apm.yml").read_bytes())
+    assert "late" in {server["name"] for server in manifest["dependencies"]["mcp"]}
+    if fmt == "text":
+        combined = failed.stdout + failed.stderr
+        assert "output state is unknown" in combined
+        assert "Retained recovery directory" in combined and recovery_dir.name in combined
+        assert all(path in combined for path in affected)
+    else:
+        receipt = _machine(failed, fmt)["write"]
+        assert receipt["status"] == "failed"
+        assert receipt["recovery"] == "incomplete"
+        assert receipt["state_known"] is False
+        assert receipt["written"] == []
+        assert receipt["manifest_updated"] is None
+        assert receipt["mcp_imported"] is None
+        assert set(receipt["affected"]) == affected
+        assert receipt["recovery_directory"] == recovery_dir.name
     assert "all changes were rolled back" not in failed.stderr.lower()
     backups = [
         path
