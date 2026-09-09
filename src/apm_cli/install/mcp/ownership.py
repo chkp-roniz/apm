@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from apm_cli.utils.path_security import ensure_path_within
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,6 +19,7 @@ def resolve_mcp_target_servers(
     stored_configs: dict[str, dict],
     project_root: Path | None,
     user_scope: bool,
+    approved_root: Path | None = None,
 ) -> dict[str, set[str]]:
     """Return recorded ownership, adopting exact legacy baselines only when absent."""
     target_servers = {runtime: set(servers) for runtime, servers in recorded_target_servers.items()}
@@ -27,6 +30,7 @@ def resolve_mcp_target_servers(
         stored_configs=stored_configs,
         project_root=project_root,
         user_scope=user_scope,
+        approved_root=approved_root,
     )
 
 
@@ -50,8 +54,13 @@ def adopt_legacy_mcp_target_servers(
     stored_configs: dict[str, dict],
     project_root: Path | None,
     user_scope: bool,
+    approved_root: Path | None = None,
 ) -> dict[str, set[str]]:
-    """Adopt legacy native entries only when they exactly match their baseline."""
+    """Adopt exact native baselines; scoped callers authorize every read first.
+
+    ``approved_root`` is the importer's selected scope, not a config-derived
+    parent. Omitting it preserves the installer's existing read policy.
+    """
     from apm_cli.core.conflict_detector import MCPConflictDetector
     from apm_cli.factory import ClientFactory
     from apm_cli.integration.mcp_integrator import MCPIntegrator
@@ -81,15 +90,30 @@ def adopt_legacy_mcp_target_servers(
                 project_root=project_root,
                 user_scope=user_scope,
             )
-            existing_configs = [MCPConflictDetector(client).get_existing_server_configs()]
+            if approved_root is not None:
+                ensure_path_within(Path(client.get_config_path()), approved_root)
+                existing_configs = [client.get_native_server_configs(approved_root=approved_root)]
+            else:
+                existing_configs = [MCPConflictDetector(client).get_existing_server_configs()]
             legacy_reader = getattr(client, "get_legacy_current_config", None)
             if callable(legacy_reader):
-                legacy_config = legacy_reader()
-                legacy_servers = legacy_config.get(client.mcp_servers_key)
-                if isinstance(legacy_servers, dict):
-                    existing_configs.append(legacy_servers)
+                try:
+                    if approved_root is not None:
+                        # An undeclared legacy path is not authorization to read.
+                        legacy_path = client.get_legacy_config_path()
+                        if legacy_path is None:
+                            raise ValueError("No declared legacy config path")
+                        ensure_path_within(Path(legacy_path), approved_root)
+                    legacy_config = legacy_reader()
+                    legacy_servers = legacy_config.get(client.mcp_servers_key)
+                    if isinstance(legacy_servers, dict):
+                        existing_configs.append(legacy_servers)
+                except Exception:
+                    # Do not discard an authorized current baseline when only
+                    # the obsolete path is unavailable or outside the scope.
+                    logger.debug("Could not inspect obsolete MCP target %s", runtime)
         except Exception:
-            logger.debug("Could not inspect legacy MCP target %s", runtime, exc_info=True)
+            logger.debug("Could not inspect legacy MCP target %s", runtime)
             continue
 
         for name, dependency in baselines.items():

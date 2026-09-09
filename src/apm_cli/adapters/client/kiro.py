@@ -48,8 +48,7 @@ class KiroClientAdapter(CopilotClientAdapter):
         if not config_path.exists():
             return {}
         try:
-            with open(config_path, encoding="utf-8") as f:
-                data = json.load(f)
+            data = self._read_config(config_path)
             return data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Could not read %s: %s", config_path, exc)

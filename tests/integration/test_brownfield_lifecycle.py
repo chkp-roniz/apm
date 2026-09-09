@@ -1,16 +1,19 @@
-"""Brownfield lifecycle: preview -> apply -> install elsewhere -> rerun, plus a failed apply.
+"""Brownfield import, replay, consent and recovery contracts through the real CLI.
 
 Runs the real CLI through ``ApmLifecycleRunner`` inside an ``IsolatedApmEnvironment``
-and proves, with ``LifecycleStateSnapshot`` before/after captures, that the
-documented import-and-install journey preserves the original harness files and
-keeps ``.apm/``, ``.apm/.import-sources.json`` and ``apm.yml`` consistent.
+with ``LifecycleStateSnapshot`` before/after captures. Boundary-fault and stdin
+cases use the installed Python CLI entry point, not a packaged/frozen artifact:
+the existing runner still owns process isolation, timeouts and captured streams.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
+import textwrap
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 import yaml
@@ -28,7 +31,7 @@ pytestmark = [
 ]
 
 _FAKE_TOKEN = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE12"
-_INSTALL_ARGS = ("install", "--target", "cursor", "--no-policy", "--parallel-downloads", "0")
+_APPLY_ARGS = ("init", "--discover", "--apply", "--yes", "--format", "json")
 
 _ORIGINALS: dict[str, str] = {
     ".claude/rules/python.md": '---\npaths:\n  - "src/**/*.py"\n---\nUse type hints.\n',
@@ -135,13 +138,20 @@ def _scenario(
     environment["FIXTURE_TOKEN"] = "fixture-value"
     project = isolated.work_root / "project"
     project.mkdir()
+    # Client construction currently creates this empty directory during discovery.
+    # Seed it as brownfield state so no-write assertions isolate the import itself.
+    (project / ".vscode").mkdir()
     runner = ApmLifecycleRunner(
         (str(apm_binary_path),), timeout_seconds=120, scenario_timeout_seconds=600
     )
     return project, environment, runner
 
 
-def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path: Path) -> None:
+@pytest.mark.parametrize("target", ["cursor", "claude"], ids=["other-target", "source-target"])
+def test_brownfield_preview_apply_install_rerun(
+    tmp_path: Path, apm_binary_path: Path, target: str
+) -> None:
+    """Other targets preserve sources; source replay rewrites rules but protects collisions."""
     project, environment, runner = _scenario(tmp_path, apm_binary_path)
     _seed(project)
     before = _snapshot(project)
@@ -181,23 +191,37 @@ def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path:
     assert after_apply.file(".apm/hooks/claude-native.json").content
     hooks = json.loads(after_apply.file(".apm/hooks/claude-native.json").content)
     commands = [h["command"] for e in hooks["hooks"]["PreToolUse"] for h in e["hooks"]]
-    assert commands == ["./.claude/hooks/notify.sh"], commands  # APM-owned entry excluded
+    # Lexical conversion preserves quoting and excludes the APM-owned entry.
+    assert commands == ['"./.claude/hooks/notify.sh"'], commands
 
+    install_args = ("install", "--target", target, "--no-policy", "--parallel-downloads", "0")
     installed = runner.run(
-        _INSTALL_ARGS, scenario_id="install-cursor", cwd=project, env=environment
+        install_args, scenario_id=f"install-{target}", cwd=project, env=environment
     )
     assert installed.returncode == 0, _evidence(installed)
     after_install = _snapshot(project)
-    _originals_unchanged(before, after_install)
-    for rel in _CURSOR_OUTPUTS:
-        assert after_install.file(rel).content, f"{rel} missing after install"
-    rule = after_install.file(".cursor/rules/python.mdc").content.decode("utf-8")
-    assert 'globs: "src/**/*.py"' in rule
-    root_rule = after_install.file(".cursor/rules/claude-root.mdc").content.decode("utf-8")
-    assert 'globs: "**"' in root_rule, "root context must stay always-on on Cursor"
-    cursor_hooks = json.loads(after_install.file(".cursor/hooks.json").content)
-    assert "echo apm-owned" not in json.dumps(cursor_hooks)
-    mcp = json.loads(after_install.file(".cursor/mcp.json").content)
+    if target == "cursor":
+        _originals_unchanged(before, after_install)
+        for rel in _CURSOR_OUTPUTS:
+            assert after_install.file(rel).content, f"{rel} missing after install"
+        rule = after_install.file(".cursor/rules/python.mdc").content.decode("utf-8")
+        assert 'globs: "src/**/*.py"' in rule
+        root_rule = after_install.file(".cursor/rules/claude-root.mdc").content.decode("utf-8")
+        assert 'globs: "**"' in root_rule, "root context must stay always-on on Cursor"
+        cursor_hooks = json.loads(after_install.file(".cursor/hooks.json").content)
+        assert "echo apm-owned" not in json.dumps(cursor_hooks)
+        mcp = json.loads(after_install.file(".cursor/mcp.json").content)
+    else:
+        rule = after_install.file(".claude/rules/python.md").content
+        assert rule != before.file(".claude/rules/python.md").content
+        assert b"Use type hints." in rule
+        assert after_install.file(".claude/agents/reviewer.md") == before.file(
+            ".claude/agents/reviewer.md"
+        ), "an unowned native agent collision must not be replaced"
+        assert after_install.file("CLAUDE.md") == before.file("CLAUDE.md"), (
+            "the unmarked native root remains hand-authored"
+        )
+        mcp = json.loads(after_install.file(".mcp.json").content)
     assert "fixture" in mcp["mcpServers"]
     assert after_install.lockfile_bytes is not None
     lock = yaml.safe_load(after_install.lockfile_bytes)
@@ -210,15 +234,40 @@ def test_brownfield_preview_apply_install_rerun(tmp_path: Path, apm_binary_path:
         env=environment,
     )
     assert rerun.returncode == 0, _evidence(rerun)
-    assert json.loads(rerun.stdout)["write"]["written"] == []
+    if target == "cursor":
+        assert json.loads(rerun.stdout)["write"]["written"] == []
+    else:
+        # Installing to the source changes the native settings document even
+        # though reimporting its remaining hand-authored hooks emits identical
+        # bytes. A provenance refresh here is not a new/duplicate primitive.
+        assert set(json.loads(rerun.stdout)["write"]["written"]) <= {
+            relative.removeprefix(".apm/") for relative in _IMPORTED
+        }
     reinstalled = runner.run(
-        _INSTALL_ARGS, scenario_id="reinstall-cursor", cwd=project, env=environment
+        install_args, scenario_id=f"reinstall-{target}", cwd=project, env=environment
     )
     assert reinstalled.returncode == 0, _evidence(reinstalled)
     after_rerun = _snapshot(project)
     assert after_rerun.manifest_bytes == after_install.manifest_bytes
-    assert after_rerun.files == after_install.files, "rerun must be byte-idempotent"
-    assert after_rerun.semantic_bytes == after_install.semantic_bytes
+    if target == "cursor":
+        assert after_rerun.files == after_install.files, "rerun must be byte-idempotent"
+        assert after_rerun.semantic_bytes == after_install.semantic_bytes
+    else:
+        assert [
+            state
+            for state in after_rerun.files
+            if state.relative_path != ".apm/.import-sources.json"
+        ] == [
+            state
+            for state in after_install.files
+            if state.relative_path != ".apm/.import-sources.json"
+        ]
+        assert after_rerun.deployment_records == after_install.deployment_records
+        settled = _full_snapshot(project)
+        again = _apply(runner, project, environment)
+        assert again.returncode == 0, _evidence(again)
+        assert _machine(again)["write"]["written"] == []
+        assert _full_snapshot(project) == settled
 
 
 def test_brownfield_partial_apply_is_unmistakable(tmp_path: Path, apm_binary_path: Path) -> None:
@@ -270,3 +319,614 @@ def test_brownfield_failed_apply_rolls_back(tmp_path: Path, apm_binary_path: Pat
     assert (project / ".apm").is_file()
     assert not (project / "apm.yml").exists()
     assert after.manifest_bytes is None and after.lockfile_bytes is None
+
+
+def _write(project: Path, relative: str, content: str) -> Path:
+    """Plant a bounded fixture without importing any production writer."""
+    path = project / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _full_snapshot(project: Path) -> LifecycleStateSnapshot:
+    """Track every project entry, including hidden/empty directories, without following links.
+
+    The parent is the capture root so malformed or symlinked apm.yml fixtures
+    are opaque config entries rather than inputs to the snapshot YAML parser.
+    Modes are asserted separately: LifecycleStateSnapshot does not record them.
+    """
+    paths = [PurePosixPath(project.name)]
+    for directory, dirs, files in os.walk(project, followlinks=False):
+        for name in dirs + files:
+            paths.append(
+                PurePosixPath((Path(directory) / name).relative_to(project.parent).as_posix())
+            )
+    return LifecycleStateSnapshot.capture(project.parent, config_paths=paths)
+
+
+def _machine(result: CommandResult, fmt: str = "json") -> dict[str, Any]:
+    """Parse exactly one machine document, leaving prompts and plans on stderr."""
+    assert result.stdout.strip(), _evidence(result)
+    if fmt == "json":
+        payload = json.loads(result.stdout)
+    else:
+        documents = list(yaml.safe_load_all(result.stdout))
+        assert len(documents) == 1, _evidence(result)
+        payload = documents[0]
+    assert isinstance(payload, dict) and isinstance(payload.get("write"), dict), _evidence(result)
+    assert "Traceback" not in result.stderr, _evidence(result)
+    return payload
+
+
+def _apply(
+    runner: ApmLifecycleRunner, project: Path, environment: dict[str, str], *extra: str
+) -> CommandResult:
+    """Run the public apply command; never call the materializer in process."""
+    return runner.run(
+        (*_APPLY_ARGS, *extra), scenario_id="brownfield-apply", cwd=project, env=environment
+    )
+
+
+def _engine_runner(apm_engine_command: tuple[str, ...], setup: str) -> ApmLifecycleRunner:
+    """Instrument only a boundary in the installed CLI, following lifecycle fault conventions."""
+    entrypoint = (
+        "import os, sys, io\n"
+        "from pathlib import Path\n"
+        "from apm_cli.cli import cli\n"
+        "import apm_cli.adopt.materialize as materialize\n" + textwrap.dedent(setup) + "\ncli()\n"
+    )
+    return ApmLifecycleRunner((apm_engine_command[0], "-c", entrypoint), timeout_seconds=120)
+
+
+_STDIN_SETUP = """
+class ControlledInput(io.StringIO):
+    def isatty(self):
+        return os.environ.get("W5_TTY") == "1"
+    def readline(self, *args, **kwargs):
+        edit = os.environ.get("W5_PROMPT_EDIT")
+        if edit:
+            Path(edit).write_text("local edit while deciding\\n", encoding="utf-8")
+            print("W5: prompt edit made", file=sys.stderr)
+        return super().readline(*args, **kwargs)
+sys.stdin = ControlledInput(os.environ.get("W5_ANSWER", ""))
+"""
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+def test_brownfield_cleanup_failure_is_not_reported_as_success(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], fmt: str
+) -> None:
+    project, environment, _runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/rules/python.md", "Preserve completed output.\n")
+    runner = _engine_runner(
+        apm_engine_command,
+        """
+        original_cleanup = materialize.safe_rmtree
+        def denied_cleanup(path, *args, **kwargs):
+            if Path(path).name.startswith(".apm-adopt-"):
+                raise PermissionError("contained cleanup denied")
+            return original_cleanup(path, *args, **kwargs)
+        materialize.safe_rmtree = denied_cleanup
+        """,
+    )
+    result = _apply(runner, project, environment, "--format", fmt)
+    assert result.returncode == 1, _evidence(result)
+    write = _machine(result, fmt)["write"]
+    assert write["status"] == "failed"
+    assert "cleanup failed" in write["reason"]
+    assert write["written"]
+    assert write["recovery"] != "restored"
+    assert (project / ".apm/instructions/python.instructions.md").is_file()
+    assert list(project.glob(".apm-adopt-*"))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "edit",
+        "add",
+        "remove",
+        "hidden",
+        pytest.param(
+            "mode",
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX executable-bit contract"),
+        ),
+    ],
+)
+def test_brownfield_skill_local_change_blocks_refresh(
+    tmp_path: Path, apm_binary_path: Path, change: str
+) -> None:
+    """A changed source cannot erase any kind of local skill-tree customization."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    source = _write(
+        project, ".claude/skills/deploy/SKILL.md", _ORIGINALS[".claude/skills/deploy/SKILL.md"]
+    )
+    _write(project, ".claude/skills/deploy/helper.sh", "#!/bin/sh\necho original\n").chmod(0o644)
+    first = _apply(runner, project, environment)
+    assert first.returncode == 0, _evidence(first)
+    adopted = project / ".apm/skills/deploy"
+    helper = adopted / "helper.sh"
+    if change == "edit":
+        helper.write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    elif change == "add":
+        _write(adopted, "notes.md", "local notes\n")
+    elif change == "remove":
+        helper.unlink()
+    elif change == "hidden":
+        _write(adopted, ".local/notes", "hidden local notes\n")
+        (adopted / ".empty").mkdir()
+    else:
+        helper.chmod(0o755)
+    source.write_text(source.read_text(encoding="utf-8") + "Changed upstream.\n", encoding="utf-8")
+    before = _full_snapshot(project)
+    mode_before = stat.S_IMODE(helper.stat().st_mode) if helper.exists() else None
+
+    refresh = _apply(runner, project, environment)
+
+    assert _full_snapshot(project) == before, "protected skill refresh changed durable state"
+    if helper.exists():
+        assert stat.S_IMODE(helper.stat().st_mode) == mode_before
+    assert refresh.returncode == 1, _evidence(refresh)
+    payload = _machine(refresh)
+    assert payload["write"]["status"] == "partial", payload
+    assert payload["write"]["written"] == []
+    assert ".claude/skills/deploy" in json.dumps(payload["write"]), payload
+
+
+def test_brownfield_legacy_empty_tree_hash_is_not_refresh_authority(
+    tmp_path: Path, apm_binary_path: Path
+) -> None:
+    """An old empty directory digest cannot authorize replacing an unverified tree."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    source = _write(
+        project, ".claude/skills/deploy/SKILL.md", _ORIGINALS[".claude/skills/deploy/SKILL.md"]
+    )
+    first = _apply(runner, project, environment)
+    assert first.returncode == 0, _evidence(first)
+    sidecar = project / ".apm/.import-sources.json"
+    recorded = json.loads(sidecar.read_text(encoding="utf-8"))["entries"]["skills/deploy"]
+    legacy = {key: recorded[key] for key in ("source", "scope", "converter", "source_sha256")}
+    legacy["output_sha256"] = ""
+    sidecar.write_text(
+        json.dumps({"version": 1, "entries": {"skills/deploy": legacy}}), encoding="utf-8"
+    )
+    _write(project, ".apm/skills/deploy/local.md", "unverified legacy customization\n")
+    source.write_text(source.read_text(encoding="utf-8") + "Upstream changed.\n", encoding="utf-8")
+    before = _full_snapshot(project)
+
+    refresh = _apply(runner, project, environment)
+
+    assert _full_snapshot(project) == before
+    assert refresh.returncode == 1, _evidence(refresh)
+    assert _machine(refresh)["write"]["status"] == "partial"
+
+
+def _source_destinations(project: Path) -> dict[str, str]:
+    """Read the durable source attribution, not the optional public write.items field."""
+    entries = json.loads((project / ".apm/.import-sources.json").read_text(encoding="utf-8"))[
+        "entries"
+    ]
+    return {record["source"]: destination for destination, record in entries.items()}
+
+
+@pytest.mark.parametrize("churn", ["insert", "remove", "reorder"])
+def test_brownfield_collision_churn_retains_source_destinations(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], churn: str
+) -> None:
+    """Colliding sources keep their established destinations even when an owner disappears."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    first_source = ".claude/rules/a-b.md"
+    second_source = ".claude/rules/a/b.md"
+    _write(project, first_source, "First owner.\n")
+    _write(project, second_source, "Second owner.\n")
+    first = _apply(runner, project, environment)
+    assert first.returncode == 0, _evidence(first)
+    established = _source_destinations(project)
+    assert set(established) == {first_source, second_source}
+    assert len(set(established.values())) == 2
+    first_bytes = (project / ".apm" / established[first_source]).read_bytes()
+    _write(project, second_source, "Second owner changed upstream.\n")
+    if churn == "insert":
+        # Sorts before both originals, but flattens to the same a-b stem.
+        _write(project, ".claude/rules/a b.md", "Inserted owner.\n")
+    elif churn == "remove":
+        (project / first_source).unlink()
+    else:
+        # Permute real discovered findings, not converter decisions or filesystem I/O.
+        runner = _engine_runner(
+            apm_engine_command,
+            """
+            import dataclasses
+            import apm_cli.adopt as adopt
+            original_discover = adopt.discover
+            def reversed_discover(*args, **kwargs):
+                report = original_discover(*args, **kwargs)
+                return dataclasses.replace(report, findings=tuple(reversed(report.findings)))
+            adopt.discover = reversed_discover
+        """,
+        )
+
+    refresh = _apply(runner, project, environment)
+
+    assert refresh.returncode == 0, _evidence(refresh)
+    destinations = _source_destinations(project)
+    assert {source: destinations[source] for source in established} == established
+    assert (project / ".apm" / established[first_source]).read_bytes() == first_bytes
+    assert (
+        b"Second owner changed upstream."
+        in (project / ".apm" / established[second_source]).read_bytes()
+    )
+    if churn == "insert":
+        assert destinations[".claude/rules/a b.md"] not in established.values()
+        assert (
+            b"Inserted owner."
+            in (project / ".apm" / destinations[".claude/rules/a b.md"]).read_bytes()
+        )
+
+
+_LATE_FAULT_SETUP = """
+def after_replacement():
+    target = Path(os.environ["W5_REPLACED_PATH"])
+    assert b"upstream replacement" in target.read_bytes(), "fault must follow actual replacement"
+    print("W5: replacement observed before late fault", file=sys.stderr)
+
+if os.environ["W5_LATE_FAULT"] == "manifest":
+    original_manifest = materialize.apply_manifest_delta
+    def fail_manifest(*args, **kwargs):
+        result = original_manifest(*args, **kwargs)
+        if not kwargs.get("dry_run", False):
+            after_replacement()
+            raise OSError("W5 late manifest write failure")
+        return result
+    materialize.apply_manifest_delta = fail_manifest
+else:
+    original_save = materialize.ImportSources.save
+    def fail_provenance(self, *args, **kwargs):
+        result = original_save(self, *args, **kwargs)
+        after_replacement()
+        raise OSError("W5 late provenance write failure")
+    materialize.ImportSources.save = fail_provenance
+
+if os.environ.get("W5_FAIL_RESTORE") == "1":
+    def fail_restore(*args, **kwargs):
+        print("W5: automatic restore attempted", file=sys.stderr)
+        raise PermissionError("W5 restore destination denied")
+    materialize._restore_destination = fail_restore
+"""
+
+
+def _refresh_fixture(
+    project: Path, environment: dict[str, str], runner: ApmLifecycleRunner
+) -> None:
+    """Import old bytes, then arrange a real file refresh and a real manifest delta."""
+    _write(project, ".claude/rules/python.md", "Original adopted rule.\n")
+    first = _apply(runner, project, environment)
+    assert first.returncode == 0, _evidence(first)
+    _write(project, ".claude/rules/python.md", "New upstream replacement.\n")
+    _write(
+        project,
+        ".mcp.json",
+        json.dumps({"mcpServers": {"late": {"command": "printf", "args": ["inert"]}}}),
+    )
+    environment["W5_REPLACED_PATH"] = str(project / ".apm/instructions/python.instructions.md")
+
+
+@pytest.mark.parametrize("fault", ["manifest", "provenance"])
+def test_brownfield_late_refresh_failure_automatically_restores_snapshot(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], fault: str
+) -> None:
+    """A failure after replacing adopted bytes restores files, manifest and provenance."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _refresh_fixture(project, environment, runner)
+    before = _full_snapshot(project)
+    environment["W5_LATE_FAULT"] = fault
+
+    failed = _apply(_engine_runner(apm_engine_command, _LATE_FAULT_SETUP), project, environment)
+
+    assert "W5: replacement observed before late fault" in failed.stderr, _evidence(failed)
+    assert failed.returncode == 1, _evidence(failed)
+    assert _machine(failed)["write"]["status"] == "failed"
+    assert _full_snapshot(project) == before, (
+        "automatic rollback did not restore the entire project"
+    )
+
+
+def test_brownfield_incomplete_rollback_reports_recovery_truthfully(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...]
+) -> None:
+    """A denied restore is not reported as successful rollback and retains recoverable bytes."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _refresh_fixture(project, environment, runner)
+    old_bytes = Path(environment["W5_REPLACED_PATH"]).read_bytes()
+    environment.update(W5_LATE_FAULT="provenance", W5_FAIL_RESTORE="1")
+
+    failed = _apply(_engine_runner(apm_engine_command, _LATE_FAULT_SETUP), project, environment)
+
+    assert "W5: replacement observed before late fault" in failed.stderr, _evidence(failed)
+    assert "W5: automatic restore attempted" in failed.stderr, _evidence(failed)
+    assert failed.returncode == 1, _evidence(failed)
+    payload = _machine(failed)
+    assert payload["write"]["status"] == "failed"
+    assert payload["write"]["recovery"] == "incomplete"
+    assert "all changes were rolled back" not in failed.stderr.lower()
+    backups = [
+        path
+        for path in project.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and path != Path(environment["W5_REPLACED_PATH"])
+        and path.read_bytes() == old_bytes
+    ]
+    assert backups, "failed recovery must retain safely contained original bytes"
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+@pytest.mark.parametrize(
+    ("answer", "tty", "expected_status", "expected_exit"),
+    [
+        pytest.param("yes\n", True, "complete", 0, id="affirmative"),
+        pytest.param("no\n", True, "cancelled", 0, id="negative"),
+        pytest.param("\n", True, "cancelled", 0, id="blank"),
+        pytest.param("", True, "cancelled", 0, id="eof"),
+        pytest.param("yes\n", False, "refused", 1, id="non-tty"),
+    ],
+)
+def test_brownfield_consent_has_one_machine_document(
+    tmp_path: Path,
+    apm_binary_path: Path,
+    apm_engine_command: tuple[str, ...],
+    fmt: str,
+    answer: str,
+    tty: bool,
+    expected_status: str,
+    expected_exit: int,
+) -> None:
+    """Consent is read from controlled stdin; no prompt or answer pollutes machine stdout."""
+    project, environment, _runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/rules/python.md", "Use type hints.\n")
+    before = _full_snapshot(project)
+    environment.update(W5_TTY="1" if tty else "0", W5_ANSWER=answer)
+    result = _engine_runner(apm_engine_command, _STDIN_SETUP).run(
+        ("init", "--discover", "--apply", "--format", fmt),
+        scenario_id=f"consent-{fmt}",
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == expected_exit, _evidence(result)
+    payload = _machine(result, fmt)
+    assert payload["write"]["status"] == expected_status
+    if tty:
+        assert "[y/N]" in result.stderr and "[y/N]" not in result.stdout
+    else:
+        assert "--yes" in result.stderr and "[y/N]" not in result.stderr
+    if expected_status == "complete":
+        assert (project / ".apm/instructions/python.instructions.md").is_file()
+        assert (project / "apm.yml").is_file()
+        assert (project / ".apm/.import-sources.json").is_file()
+    else:
+        assert _full_snapshot(project) == before
+        assert payload["write"]["written"] == []
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+def test_brownfield_each_mcp_warning_precedes_consent_without_secrets(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], fmt: str
+) -> None:
+    """A safe second server must not erase the first server's credential-setup warning."""
+    project, environment, _runner = _scenario(tmp_path, apm_binary_path)
+    _write(
+        project,
+        ".mcp.json",
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a-needs-token": {
+                        "command": "printf",
+                        "env": {"W5_SERVICE_TOKEN": _FAKE_TOKEN},
+                    },
+                    "z-safe": {"command": "printf", "args": ["inert"]},
+                }
+            }
+        ),
+    )
+    environment.update(W5_TTY="1", W5_ANSWER="yes\n")
+    result = _engine_runner(apm_engine_command, _STDIN_SETUP).run(
+        ("init", "--discover", "--apply", "--format", fmt),
+        scenario_id=f"mcp-consent-{fmt}",
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 0, _evidence(result)
+    payload = _machine(result, fmt)
+    assert payload["write"]["status"] == "complete"
+    assert _FAKE_TOKEN not in result.stdout and _FAKE_TOKEN not in result.stderr
+    plan, prompt, _tail = result.stderr.partition("[y/N]")
+    assert prompt, _evidence(result)
+    assert "a-needs-token" in plan and "z-safe" in plan
+    manifest = (project / "apm.yml").read_text(encoding="utf-8")
+    assert _FAKE_TOKEN not in manifest
+    entries = {entry["name"]: entry for entry in yaml.safe_load(manifest)["dependencies"]["mcp"]}
+    assert (
+        entries["a-needs-token"]["env"]["W5_SERVICE_TOKEN"] == "${A_NEEDS_TOKEN_W5_SERVICE_TOKEN}"
+    )
+    assert entries["z-safe"]["args"] == ["inert"]
+    assert "A_NEEDS_TOKEN_W5_SERVICE_TOKEN" in plan and "export" in plan.lower(), plan
+
+
+def test_brownfield_prompt_time_edit_is_rechecked_before_replace(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...]
+) -> None:
+    """Approval cannot authorize overwriting bytes edited after the plan was prepared."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/rules/python.md", "Original rule.\n")
+    first = _apply(runner, project, environment)
+    assert first.returncode == 0, _evidence(first)
+    _write(project, ".claude/rules/python.md", "Changed upstream rule.\n")
+    destination = project / ".apm/instructions/python.instructions.md"
+    original = destination.read_bytes()
+    destination.write_text("local edit while deciding\n", encoding="utf-8")
+    expected = _full_snapshot(project)
+    destination.write_bytes(original)
+    environment.update(W5_TTY="1", W5_ANSWER="yes\n", W5_PROMPT_EDIT=str(destination))
+
+    result = _engine_runner(apm_engine_command, _STDIN_SETUP).run(
+        ("init", "--discover", "--apply", "--format", "json"),
+        scenario_id="prompt-time-edit",
+        cwd=project,
+        env=environment,
+    )
+
+    assert "W5: prompt edit made" in result.stderr, _evidence(result)
+    assert _full_snapshot(project) == expected
+    assert result.returncode == 1, _evidence(result)
+    assert _machine(result)["write"]["status"] == "partial"
+
+
+def test_brownfield_auxiliary_script_edit_blocks_associated_hook_refresh(
+    tmp_path: Path, apm_binary_path: Path
+) -> None:
+    """The hook and its copied script are one protected refresh, not independent outputs."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/hooks/notify.sh", "#!/bin/sh\nprintf original\n").chmod(0o755)
+    settings = _write(project, ".claude/settings.json", _ORIGINALS[".claude/settings.json"])
+    first = _apply(runner, project, environment, "--include-hook-scripts")
+    assert first.returncode == 0, _evidence(first)
+    scripts = list((project / ".apm/hooks").rglob("notify.sh"))
+    assert len(scripts) == 1
+    scripts[0].write_text("#!/bin/sh\nprintf locally-edited\n", encoding="utf-8")
+    native = json.loads(settings.read_text(encoding="utf-8"))
+    native["hooks"]["PreToolUse"][0]["matcher"] = "Read"
+    settings.write_text(json.dumps(native), encoding="utf-8")
+    before = _full_snapshot(project)
+
+    refresh = _apply(runner, project, environment, "--include-hook-scripts")
+
+    assert _full_snapshot(project) == before, "edited script must protect its associated hook too"
+    assert refresh.returncode == 1, _evidence(refresh)
+    assert _machine(refresh)["write"]["status"] == "partial"
+
+
+_FORBID_OUTSIDE_IO = """
+# Observe actual OS-level Python opens/enumeration, without replacing the reader
+# under test. resolve/readlink is allowed for admission, outside content is not.
+blocked = Path(os.environ["W5_OUTSIDE"]).resolve()
+def audit(event, args):
+    if event not in ("open", "os.scandir", "os.listdir"):
+        return
+    candidate = args[0]
+    if isinstance(candidate, (str, bytes, os.PathLike)):
+        path = Path(os.fsdecode(candidate))
+        # open's audit event omits dir_fd: a relative cleanup name is not
+        # necessarily relative to cwd. All fixture readers use absolute Paths.
+        if not path.is_absolute():
+            return
+        resolved = path.resolve()
+        if resolved == blocked or blocked in resolved.parents:
+            print("W5: forbidden outside I/O attempted", file=sys.stderr)
+            raise PermissionError("W5 outside fixture access forbidden")
+sys.addaudithook(audit)
+"""
+
+
+@pytest.mark.parametrize("endpoint", ["apm-directory", "manifest", "provenance"])
+def test_brownfield_unsafe_output_endpoint_refuses_before_outside_io(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], endpoint: str
+) -> None:
+    """Redirected mutable endpoints cannot become an authority to read or write outside scope."""
+    project, environment, _runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/rules/python.md", "Safe source.\n")
+    outside = project.parent / "outside"
+    _write(outside, "sentinel.txt", "outside untouched\n")
+    if endpoint == "apm-directory":
+        (project / ".apm").symlink_to(outside, target_is_directory=True)
+    elif endpoint == "manifest":
+        manifest = _write(outside, "manifest.yml", "name: outside\nversion: 1.0.0\n")
+        (project / "apm.yml").symlink_to(manifest)
+    else:
+        sidecar = _write(outside, "provenance.json", '{"version": 1, "entries": {}}')
+        (project / ".apm").mkdir()
+        (project / ".apm/.import-sources.json").symlink_to(sidecar)
+    before, outside_before = _full_snapshot(project), _full_snapshot(outside)
+    environment["W5_OUTSIDE"] = str(outside)
+
+    result = _apply(_engine_runner(apm_engine_command, _FORBID_OUTSIDE_IO), project, environment)
+
+    assert "W5: forbidden outside I/O attempted" not in result.stderr, _evidence(result)
+    assert _full_snapshot(outside) == outside_before
+    assert _full_snapshot(project) == before
+    assert result.returncode == 1, _evidence(result)
+    assert _machine(result)["write"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("source", ["ancestor", "settings"])
+def test_brownfield_escaped_source_is_never_read(
+    tmp_path: Path, apm_binary_path: Path, apm_engine_command: tuple[str, ...], source: str
+) -> None:
+    """Scope admission rejects source ancestors and native settings before their content is read."""
+    project, environment, _runner = _scenario(tmp_path, apm_binary_path)
+    outside = project.parent / "outside"
+    _write(outside, "rules/private.md", "Outside private content.\n")
+    settings = _write(
+        outside, "settings.json", '{"hooks":{"PreToolUse":[{"command":"echo inert"}]}}'
+    )
+    if source == "ancestor":
+        (project / ".claude").symlink_to(outside, target_is_directory=True)
+    else:
+        (project / ".claude").mkdir()
+        (project / ".claude/settings.json").symlink_to(settings)
+    before, outside_before = _full_snapshot(project), _full_snapshot(outside)
+    environment["W5_OUTSIDE"] = str(outside)
+
+    result = _apply(_engine_runner(apm_engine_command, _FORBID_OUTSIDE_IO), project, environment)
+
+    assert "W5: forbidden outside I/O attempted" not in result.stderr, _evidence(result)
+    assert _full_snapshot(outside) == outside_before
+    assert _full_snapshot(project) == before
+    assert result.returncode == 1, _evidence(result)
+    assert _machine(result)["write"]["status"] == "partial"
+
+
+@pytest.mark.parametrize("fmt", ["json", "yaml"])
+def test_brownfield_malformed_manifest_has_structured_preparation_failure(
+    tmp_path: Path, apm_binary_path: Path, fmt: str
+) -> None:
+    """Invalid existing configuration fails through the machine envelope without durable writes."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _write(project, ".claude/rules/python.md", "Use type hints.\n")
+    _write(project, "apm.yml", "name: [unterminated\n")
+    before = _full_snapshot(project)
+
+    result = runner.run(
+        ("init", "--discover", "--apply", "--yes", "--format", fmt),
+        scenario_id=f"malformed-manifest-{fmt}",
+        cwd=project,
+        env=environment,
+    )
+
+    assert _full_snapshot(project) == before
+    assert result.returncode == 1, _evidence(result)
+    assert _machine(result, fmt)["write"]["status"] == "failed"
+
+
+def test_brownfield_reference_only_plan_makes_no_writes(
+    tmp_path: Path, apm_binary_path: Path
+) -> None:
+    """Excluded native permission maps remain reference-only, not an empty package creation."""
+    project, environment, runner = _scenario(tmp_path, apm_binary_path)
+    _write(
+        project,
+        ".opencode/agents/reviewer.md",
+        "---\ndescription: Review\ntools:\n  read: true\n  write: false\n---\nReview.\n",
+    )
+    before = _full_snapshot(project)
+
+    result = _apply(runner, project, environment)
+
+    assert result.returncode == 0, _evidence(result)
+    payload = _machine(result)
+    assert payload["write"]["status"] == "complete"
+    assert payload["write"]["written"] == []
+    assert _full_snapshot(project) == before

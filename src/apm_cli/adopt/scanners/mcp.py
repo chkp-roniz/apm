@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from apm_cli.adapters.client.base import server_configs_from_document  # noqa: F401
 from apm_cli.factory import ClientFactory
 from apm_cli.utils.path_security import PathTraversalError, ensure_path_within
 
@@ -18,27 +19,6 @@ from ..registry import ScanContext
 
 # Runtimes whose adapters only ever write machine-global configuration.
 _USER_ONLY_RUNTIMES = frozenset({"intellij", "windsurf", "hermes"})
-
-
-def server_configs_from_document(document: Any, key: str) -> dict[str, Mapping[str, Any]]:
-    """Return ``{name: config}`` from a parsed client document.
-
-    Codex TOML may surface ``mcp_servers."name"`` as flat dotted keys; both the
-    nested and the flat spelling are normalised here.
-    """
-    if not isinstance(document, Mapping):
-        return {}
-    servers: dict[str, Mapping[str, Any]] = {}
-    nested = document.get(key)
-    if isinstance(nested, Mapping):
-        for name, config in nested.items():
-            if isinstance(config, Mapping):
-                servers[str(name)] = config
-    prefix = f"{key}."
-    for raw_key, config in document.items():
-        if isinstance(raw_key, str) and raw_key.startswith(prefix) and isinstance(config, Mapping):
-            servers.setdefault(raw_key[len(prefix) :].strip('"'), config)
-    return servers
 
 
 def _risk_for(config: Mapping[str, Any]) -> frozenset[Risk]:
@@ -72,19 +52,20 @@ class McpScanner:
                     ScanError(f"<{runtime} mcp config>", f"adapter error: {type(exc).__name__}")
                 )
                 continue
-            if not user_scope:
-                try:
-                    ensure_path_within(config_path.resolve(strict=False), ctx.root)
-                except PathTraversalError:
-                    continue
+            try:
+                ensure_path_within(config_path, ctx.root)
+            except (PathTraversalError, OSError, RuntimeError):
+                ctx.error(
+                    config_path, "MCP config is outside or cannot be verified within selected scope"
+                )
+                continue
             if not config_path.is_file():
                 continue
             try:
-                document = adapter.get_current_config()
+                servers = adapter.get_native_server_configs(approved_root=ctx.root)
             except Exception as exc:  # malformed on-disk config must not abort discovery
                 ctx.error(config_path, f"unreadable MCP config: {type(exc).__name__}")
                 continue
-            servers = server_configs_from_document(document, adapter.mcp_servers_key or "")
             if not servers:
                 continue
             display = ctx.display(config_path)

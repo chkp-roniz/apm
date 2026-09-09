@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -18,9 +19,14 @@ def write(path: Path, text: str) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _quiet_update_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+def _quiet_update_notice(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Keep stdout machine-clean: the update banner would break --format json."""
+    from apm_cli.utils.console import _reset_console
+
     monkeypatch.setenv("APM_E2E_TESTS", "1")
+    _reset_console()
+    yield
+    _reset_console()
 
 
 @pytest.fixture
@@ -105,5 +111,16 @@ def mixed_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def in_project(mixed_project: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Use only supported inputs for successful apply/refresh scenarios."""
+    mcp_path = mixed_project / ".mcp.json"
+    mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
+    mcp["mcpServers"]["remote"] = {
+        "type": "http",
+        "url": "https://example.com/mcp",
+        "headers": {"Authorization": "Bearer ${REMOTE_TOKEN}"},
+    }
+    write(mcp_path, json.dumps(mcp))
+    (mixed_project / ".claude/rules/binary.md").unlink()
+    (mixed_project / ".cursor/rules/escape.mdc").unlink(missing_ok=True)
     monkeypatch.chdir(mixed_project)
     return mixed_project

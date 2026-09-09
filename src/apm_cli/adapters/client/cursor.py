@@ -96,8 +96,7 @@ class CursorClientAdapter(CopilotClientAdapter):
             return {}
 
         try:
-            with open(config_path, encoding="utf-8") as f:
-                return json.load(f)
+            return self._read_config(Path(config_path))
         except (OSError, json.JSONDecodeError):
             return {}
 

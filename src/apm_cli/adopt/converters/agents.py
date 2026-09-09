@@ -5,9 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from apm_cli.integration.opencode_frontmatter import validate_opencode_frontmatter
+from apm_cli.utils.path_security import PathTraversalError
+from apm_cli.utils.yaml_io import yaml_to_str
+
 from ..model import Finding
+from ..safety import approved_path
 from . import ConvertContext, ConvertError, ConvertResult
-from .base import derive_description, emit_markdown, read_markdown, read_text, split_tools
+from .base import (
+    derive_description,
+    emit_markdown,
+    read_markdown,
+    read_text,
+    refuse_credentials,
+    split_tools,
+)
 
 NEUTRAL_AGENT_KEYS: tuple[str, ...] = (
     "name",
@@ -40,17 +52,42 @@ class AgentsConverter:
     id = "agents->agent"
 
     def handles(self, converter_id: str) -> bool:
-        return converter_id.endswith("->agent")
+        return converter_id.removesuffix("->agent") in {
+            "claude_agent",
+            "cursor_agent",
+            "codex_agent",
+            "github_agent",
+            "grok_agent",
+            "kiro_agent",
+            "opencode_agent",
+        }
 
     def convert(self, finding: Finding, dest: Path, *, ctx: ConvertContext) -> ConvertResult:
         if finding.abs_path is None:
             raise ConvertError("no source path")
+        try:
+            approved_path(finding.abs_path, ctx.project_root, mutable=True)
+        except PathTraversalError as exc:
+            raise ConvertError("agent source failed scope admission; refusing to import") from exc
         result = ConvertResult()
         fmt = finding.format_id or ""
         if fmt == "codex_agent" or finding.abs_path.suffix == ".toml":
             meta, body = _from_toml(read_text(finding.abs_path, ctx.limits.max_file_bytes), result)
         else:
             meta, body = read_markdown(finding.abs_path, ctx.limits.max_file_bytes, result)
+        refuse_credentials(body)
+        refuse_credentials(yaml_to_str(meta))
+        if fmt == "opencode_agent" or finding.tool == "opencode":
+            if validate_opencode_frontmatter(meta, finding.abs_path):
+                result.skipped_reason = (
+                    "native OpenCode frontmatter is incompatible with its validator"
+                )
+                return result
+            if "tools" in meta or "permission" in meta:
+                result.skipped_reason = (
+                    "OpenCode native tools/permission policy has no preserving renderer"
+                )
+                return result
         out: dict[str, Any] = {}
         for key in NEUTRAL_AGENT_KEYS:
             if key not in meta or meta[key] in (None, ""):
@@ -68,10 +105,6 @@ class AgentsConverter:
                         "frontmatter.tools",
                         "Kiro capability tags are not tool names on other harnesses",
                         "warning",
-                    )
-                if fmt == "opencode_agent" and isinstance(value, dict):
-                    result.drop(
-                        "frontmatter.tools[disabled]", "disabled OpenCode tools not representable"
                     )
                 out[key] = tools
             else:

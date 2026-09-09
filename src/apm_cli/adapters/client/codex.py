@@ -51,8 +51,7 @@ class CodexClientAdapter(MCPClientAdapter):
                 config paths instead of project-local paths.
         """
         super().__init__(project_root=project_root, user_scope=user_scope)
-        self.registry_client = SimpleRegistryClient(registry_url)
-        self.registry_integration = RegistryIntegration(registry_url)
+        self._configure_registry(SimpleRegistryClient, RegistryIntegration, registry_url)
 
     def _get_codex_dir(self) -> Path:
         """Return the root directory used for Codex config in the current scope."""
@@ -102,6 +101,11 @@ class CodexClientAdapter(MCPClientAdapter):
         _log.debug("Codex config written to %s", config_path)
         return True
 
+    def _read_config(self, path: Path):
+        """Parse native TOML without emitting write-path diagnostics."""
+        with open(path, encoding="utf-8") as config_file:
+            return tomlkit.load(config_file)
+
     def get_current_config(self):
         """Get the current Codex CLI MCP configuration.
 
@@ -116,8 +120,7 @@ class CodexClientAdapter(MCPClientAdapter):
             return {}
 
         try:
-            with open(config_path, encoding="utf-8") as config_file:
-                return tomlkit.load(config_file)
+            return self._read_config(Path(config_path))
         except (TOMLKitError, UnicodeDecodeError) as exc:
             _log.debug("Failed to parse Codex config at %s", config_path, exc_info=True)
             _rich_warning(

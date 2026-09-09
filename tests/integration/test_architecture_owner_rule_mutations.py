@@ -140,6 +140,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Generated footer owner loses the one canonical builder definition.",
     ),
     MutationCase(
+        guard_id="contracts-tooling-import-provenance",
+        rule_id="contracts-tooling-import-provenance",
+        path="src/apm_cli/adopt/materialize.py",
+        old="allocator.reserve(provenance.entries)",
+        new="allocator.reserve(())",
+        intent="Importer stops reserving recorded destinations when the discovered source set changes.",
+    ),
+    MutationCase(
         guard_id="contracts-tooling-lockfile-read",
         rule_id="contracts-tooling-lockfile-read",
         path="src/apm_cli/deps/lockfile.py",
@@ -276,6 +284,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="parse_targets_field(apm_config)",
         new="parse_target_fields(apm_config)",
         intent="MCP install adapter stops parsing targets through the manifest owner.",
+    ),
+    MutationCase(
+        guard_id="hooks-integrations-native-agent-compatibility",
+        rule_id="mutation_writes.native_agent_compatibility",
+        path="src/apm_cli/adopt/converters/agents.py",
+        old="if validate_opencode_frontmatter(meta, finding.abs_path):",
+        new="if False:",
+        intent="Native agent adoption bypasses the canonical OpenCode frontmatter validator.",
     ),
     MutationCase(
         guard_id="hooks-integrations-neutral-hook-contract",

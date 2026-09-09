@@ -272,6 +272,7 @@ def integrate_kiro_hooks(
             hook_file_dir=hook_file.parent,
             root_dir=root_dir,
             deploy_root=deploy_root_for_rewrite,
+            project_root=project_root,
         )
         written, skipped, adopted = _write_kiro_hook_docs(
             integrator,

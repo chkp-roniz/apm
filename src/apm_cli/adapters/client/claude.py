@@ -170,7 +170,7 @@ class ClaudeClientAdapter(CopilotClientAdapter):
         if not path.is_file():
             return {"mcpServers": {}}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = self._read_config(path)
             if not isinstance(data, dict):
                 return {"mcpServers": {}}
             return {"mcpServers": dict(data.get("mcpServers") or {})}

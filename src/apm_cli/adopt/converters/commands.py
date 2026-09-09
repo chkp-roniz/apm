@@ -48,7 +48,12 @@ class CommandsConverter:
     id = "commands->prompt"
 
     def handles(self, converter_id: str) -> bool:
-        return converter_id.endswith("->prompt")
+        return converter_id.removesuffix("->prompt") in {
+            "claude_command",
+            "gemini_command",
+            "opencode_command",
+            "windsurf_workflow",
+        }
 
     def convert(self, finding: Finding, dest: Path, *, ctx: ConvertContext) -> ConvertResult:
         if finding.abs_path is None:

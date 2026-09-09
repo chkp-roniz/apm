@@ -10,7 +10,12 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
-from apm_cli.adopt.converters import ConvertContext, ConvertResult, register_builtin_converters
+from apm_cli.adopt.converters import (
+    ConvertContext,
+    ConvertError,
+    ConvertResult,
+    register_builtin_converters,
+)
 from apm_cli.adopt.converters.mcp import placeholder_name, to_manifest_entry
 from apm_cli.adopt.converters.root_context import strip_managed_section
 from apm_cli.adopt.converters.rules import RulesConverter
@@ -121,10 +126,25 @@ def test_mcp_entry_redacts_secrets_and_keeps_placeholders():
     assert entry["env"]["MODE"] == "fast"
     assert FAKE_TOKEN not in json.dumps(entry)
     assert FAKE_TOKEN not in " ".join(c.reason for c in result.changes)
-    remote = to_manifest_entry(
+    unsupported_remote_args = (
         "codex",
         "r",
         {"url": "https://u:p@h/x?token=abc", "bearer_token_env_var": "TOK"},
+        ConvertResult(),
+    )
+    with pytest.raises(
+        ConvertError, match=r"url.*literal credential.*safe replay conversion"
+    ) as refused:
+        to_manifest_entry(*unsupported_remote_args)
+    assert FAKE_TOKEN not in str(refused.value)
+    remote = to_manifest_entry(
+        "claude",
+        "r",
+        {
+            "type": "http",
+            "url": "https://h/x",
+            "headers": {"Authorization": "Bearer ${TOK}"},
+        },
         ConvertResult(),
     )
     assert remote["transport"] == "http"
@@ -132,17 +152,19 @@ def test_mcp_entry_redacts_secrets_and_keeps_placeholders():
 
     parsed = urlsplit(remote["url"])
     assert parsed.hostname == "h"
-    assert parsed.username == "${R_URL_USER}"
-    assert parsed.password == "${R_URL_PASSWORD}"
+    assert parsed.scheme == "https" and parsed.path == "/x"
+    assert parsed.username is None and parsed.password is None
     assert remote["headers"]["Authorization"] == "Bearer ${TOK}"
-    token_url = to_manifest_entry(
-        "cursor",
-        "remote",
-        {"type": "http", "url": f"https://{FAKE_TOKEN}@mcp.example.com/sse"},
-        ConvertResult(),
-    )
-    assert FAKE_TOKEN not in json.dumps(token_url)
-    assert "${" in urlsplit(token_url["url"]).username
+    with pytest.raises(
+        ConvertError, match=r"url.*literal credential.*safe replay conversion"
+    ) as token_url:
+        to_manifest_entry(
+            "cursor",
+            "remote",
+            {"type": "http", "url": f"https://{FAKE_TOKEN}@mcp.example.com/sse"},
+            ConvertResult(),
+        )
+    assert FAKE_TOKEN not in str(token_url.value)
     assert placeholder_name("github", "GITHUB_TOKEN") == "${GITHUB_TOKEN}"
     assert looks_like_secret("api_key", "x") and not looks_like_secret("MODE", "fast")
 
@@ -167,10 +189,19 @@ def test_registry_has_every_classified_converter():
 
     register_builtin_converters()
     for (_tool, _kind), rule in classification_rows().items():
-        if rule.converter:
-            assert CONVERTERS.get(rule.converter.replace("{format}", "cursor_rules")) is not None, (
-                rule
-            )
+        if rule.converter and "{format}" not in rule.converter:
+            assert CONVERTERS.get(rule.converter) is not None, rule
+
+
+@pytest.mark.parametrize("kind", [HarnessKind.RULE, HarnessKind.AGENT, HarnessKind.COMMAND])
+def test_unknown_inverse_formats_are_reference_only(kind: HarnessKind) -> None:
+    from apm_cli.adopt.classify import classify
+    from apm_cli.adopt.model import RawFinding
+
+    raw = RawFinding("future", Scope.PROJECT, kind, "native.md", format_id="future_format")
+    finding = classify(raw, Ownership.HOST_OWNED)
+    assert finding.importability is Importability.REFERENCE_ONLY
+    assert finding.converter_id is None
 
 
 def test_discover_default_is_read_only(in_project: Path):
@@ -237,8 +268,9 @@ def test_write_materializes_merges_and_is_idempotent(in_project: Path):
     assert (apm / "skills/shared-skill/SKILL.md").is_file()
     hooks = json.loads((apm / "hooks/claude-native.json").read_text(encoding="utf-8"))
     commands = [h["command"] for e in hooks["hooks"]["PreToolUse"] for h in e["hooks"]]
-    assert commands == ["./.claude/hooks/notify.sh"]  # APM-owned entry excluded, path normalised
+    assert commands == ['"./.claude/hooks/notify.sh"']  # APM-owned entry excluded, quotes kept
     assert not (apm / "hooks/scripts").exists()
+    assert not (apm / "hooks/claude-native/scripts").exists()
     manifest = yaml.safe_load((in_project / "apm.yml").read_text(encoding="utf-8"))
     assert manifest["targets"] == ["claude", "copilot", "cursor"]
     names = {e["name"] for e in manifest["dependencies"]["mcp"]}
@@ -262,11 +294,15 @@ def test_write_copies_hook_scripts_when_requested(in_project: Path):
         cli, ["init", "--discover", "--write", "--yes", "--include-hook-scripts"]
     )
     assert result.exit_code == 0, result.output
-    script = in_project / ".apm/hooks/scripts/notify.sh"
+    script = in_project / ".apm/hooks/claude-native/scripts/.claude/hooks/notify.sh"
     assert script.is_file()
+    assert script.read_bytes() == (in_project / ".claude/hooks/notify.sh").read_bytes()
     assert os.access(script, os.X_OK) == os.access(in_project / ".claude/hooks/notify.sh", os.X_OK)
     hooks = json.loads((in_project / ".apm/hooks/claude-native.json").read_text(encoding="utf-8"))
-    assert hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "./scripts/notify.sh"
+    assert (
+        hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        == '"./claude-native/scripts/.claude/hooks/notify.sh"'
+    )
 
 
 def test_write_refuses_without_yes_when_not_interactive(in_project: Path):
@@ -276,13 +312,11 @@ def test_write_refuses_without_yes_when_not_interactive(in_project: Path):
     assert not (in_project / ".apm").exists()
 
 
-def test_apply_shows_migration_plan_before_cancel(
-    in_project: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_apply_shows_import_plan_before_cancel(in_project: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("apm_cli.adopt.materialize._stdin_is_tty", lambda: True)
     result = CliRunner().invoke(cli, ["init", "--discover", "--apply"], input="n\n")
     assert result.exit_code == 0, result.output
-    assert "Migration plan" in result.output
+    assert "Import plan" in result.output
     assert "Will write" in result.output
     assert not (in_project / ".apm").exists()
 
@@ -293,7 +327,7 @@ def test_apply_json_shows_plan_before_cancel(in_project: Path, monkeypatch: pyte
         cli, ["init", "--discover", "--apply", "--format", "json"], input="n\n"
     )
     assert result.exit_code == 0, result.output
-    assert "Migration plan" in result.stderr
+    assert "Import plan" in result.stderr
     payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "cancelled"
     assert not (in_project / ".apm").exists()
@@ -343,13 +377,14 @@ def test_write_skips_locally_modified_import(in_project: Path):
     assert CliRunner().invoke(cli, ["init", "--discover", "--write", "--yes"]).exit_code == 0
     target = in_project / ".apm/instructions/python.instructions.md"
     target.write_text(target.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8")
+    edited = target.read_bytes()
     (in_project / ".claude/rules/python.md").write_text("changed source\n", encoding="utf-8")
     result = CliRunner().invoke(cli, ["init", "--discover", "--write", "--yes", "--format", "json"])
-    assert result.exit_code == 0, result.output
-    assert "local edit" in target.read_text(encoding="utf-8")
-    assert (
-        "instructions/python.instructions.md" not in json.loads(result.stdout)["write"]["written"]
-    )
+    assert result.exit_code == 1, result.output
+    assert target.read_bytes() == edited
+    payload = json.loads(result.stdout)
+    assert payload["write"]["status"] == "partial"
+    assert "instructions/python.instructions.md" not in payload["write"]["written"]
 
 
 def test_global_scope_scans_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -464,16 +499,22 @@ def test_skill_refuses_private_key_in_conf_extension(in_project: Path):
     assert not (in_project / ".apm/skills/deploy").exists()
 
 
-def test_mcp_redacts_slash_containing_secret_argument():
+@pytest.mark.parametrize(
+    "secret_arg", [FAKE_TOKEN, f"{FAKE_TOKEN}/segment"], ids=["token", "slash-containing-token"]
+)
+def test_mcp_refuses_literal_secret_argument(secret_arg: str):
     result = ConvertResult()
-    entry = to_manifest_entry(
-        "claude",
-        "svc",
-        {"command": "tool", "args": [FAKE_TOKEN]},
-        result,
-    )
-    assert entry["args"] == ["${SVC_ARG0}"]
-    assert FAKE_TOKEN not in json.dumps(entry)
+    with pytest.raises(
+        ConvertError, match=r"args\[0\]: literal credential.*safe replay conversion"
+    ) as refused:
+        to_manifest_entry(
+            "claude",
+            "svc",
+            {"command": "tool", "args": [secret_arg]},
+            result,
+        )
+    assert secret_arg not in str(refused.value)
+    assert FAKE_TOKEN not in " ".join(c.reason for c in result.changes)
 
 
 def test_refresh_reimports_changed_rule(in_project: Path):
@@ -506,6 +547,6 @@ def test_apply_json_tty_cancel_keeps_stdout_parseable(
     assert result.exit_code == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["write"]["status"] == "cancelled"
-    assert "Migration plan" in result.stderr
+    assert "Import plan" in result.stderr
     assert "Apply " in result.stderr
     assert not (in_project / ".apm").exists()

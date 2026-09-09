@@ -62,6 +62,40 @@ def _target_root_for_hook_source(
     return target_root
 
 
+def root_local_hook_reference(
+    source_file: Path,
+    target_rel: str,
+    package_path: Path,
+    project_root: Path | None,
+    hook_file_dir: Path | None,
+) -> str | None:
+    """Keep root-local hook bundles from deploying recursively into themselves."""
+    if project_root is None or package_path.resolve() != project_root.resolve():
+        return None
+    root = project_root.resolve()
+    source_root = _hook_source_root(
+        root, hook_file_dir.resolve() if hook_file_dir is not None else None, source_file
+    )
+    target_path = ensure_path_within(root / target_rel, root)
+    if target_path.is_relative_to(source_root):
+        return portable_relpath(source_file, root)
+    return None
+
+
+def hook_scripts_base(target: str, package_name: str, root_dir: str | None) -> str:
+    """Return the existing per-target script deployment directory."""
+    default_roots = {
+        "vscode": ".github",
+        "cursor": ".cursor",
+        "codex": ".codex",
+        "windsurf": ".windsurf",
+        "kiro": ".kiro",
+    }
+    base_root = root_dir or default_roots.get(target, ".claude")
+    scripts_dir = "hooks/scripts" if target == "vscode" else "hooks"
+    return f"{base_root}/{scripts_dir}/{package_name}"
+
+
 def _hook_module_type(package_path: Path, hook_source_root: Path) -> str:
     """Return the Node module type that governs a source hooks root."""
     current = hook_source_root

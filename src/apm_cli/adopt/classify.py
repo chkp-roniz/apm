@@ -111,6 +111,9 @@ def proposed_destination(raw: RawFinding) -> str | None:
 
 def classify(raw: RawFinding, ownership: Ownership, evidence: tuple[str, ...] = ()) -> Finding:
     """Combine table lookup with ownership into a final finding."""
+    from .converters import CONVERTERS, register_builtin_converters
+
+    register_builtin_converters()
     rule = lookup(raw.tool, raw.kind)
     importability = rule.importability
     converter = (
@@ -119,6 +122,10 @@ def classify(raw: RawFinding, ownership: Ownership, evidence: tuple[str, ...] = 
     notes = list(raw.notes)
     if rule.note:
         notes.append(rule.note)
+    if converter and CONVERTERS.get(converter) is None:
+        importability = Importability.REFERENCE_ONLY
+        converter = None
+        notes.append("native format has no supported import converter")
     if raw.format_id == "private":
         importability = Importability.IGNORED
         converter = None

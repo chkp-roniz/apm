@@ -192,6 +192,11 @@ class NameAllocator:
             return rel, candidate != base
         raise ConvertError(f"could not allocate a unique name for {stem!r}")
 
+    def reserve(self, destinations: Iterable[str]) -> None:
+        """Retain recorded ownership even when the original source disappeared."""
+        for destination in destinations:
+            self._taken[destination] = "recorded"
+
     def claim_content(self, key: str, rel: str) -> str | None:
         """Register content *key* for *rel*; return an earlier holder if duplicate."""
         existing = self._by_content.get(key)

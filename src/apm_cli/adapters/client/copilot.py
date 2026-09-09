@@ -101,8 +101,7 @@ class CopilotClientAdapter(MCPClientAdapter):
                 paths instead of project-local paths when supported.
         """
         super().__init__(project_root=project_root, user_scope=user_scope)
-        self.registry_client = SimpleRegistryClient(registry_url)
-        self.registry_integration = RegistryIntegration(registry_url)
+        self._configure_registry(SimpleRegistryClient, RegistryIntegration, registry_url)
 
     def get_config_path(self):
         """Get the path to the Copilot MCP configuration file.
@@ -159,8 +158,7 @@ class CopilotClientAdapter(MCPClientAdapter):
             return {}
 
         try:
-            with open(config_path) as f:
-                return json.load(f)
+            return self._read_config(Path(config_path))
         except (OSError, json.JSONDecodeError):
             return {}
 

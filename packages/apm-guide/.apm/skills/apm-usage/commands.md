@@ -5,8 +5,40 @@
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
 | `apm init [NAME]` | Initialize a new APM project; names must be non-empty and must not contain path separators or equal `..`. A derived filesystem-root name falls back to `my-project`. | `-y` skip prompts, `--target` comma-separated targets (CLI aliases such as `agents` and `vscode` are persisted as canonical `copilot`, so the generated manifest is immediately installable), `--plugin` (deprecated, use `apm plugin init` instead) scaffolds `plugin.json` + `apm.yml` using the same no-flag Claude-compatible default as `apm plugin init`, `--marketplace` (deprecated, use `apm marketplace init` instead) seed apm.yml with a `marketplace:` block. After init, Next Steps contextually suggests `agentrc init` (if agentrc is in PATH) or prints a tip link when no agent instruction files exist. |
-| `apm init --discover` | Inventory existing agent-harness context (Claude Code, Copilot, Cursor, Codex, Gemini, Windsurf, Kiro, OpenCode, Grok Build) and propose an `apm.yml`; read-only by default. | `--apply` (alias `--write`) import into `.apm/` and merge `apm.yml`, `--format text\|json\|yaml`, `-g`/`--global` scan user scope, `--include-hook-scripts`, `-y`, `--target` |
+| `apm init --discover` | Inventory existing configuration for onboarding; read-only unless applying. | `--apply` (alias `--write`) import supported content into `.apm/` and create/merge `apm.yml`, `--format text\|json\|yaml`, `-g`/`--global` use user scope, `--include-hook-scripts` copy supported scripts, `-y` skip confirmation only, `--target` preferred MCP conflict order and additional targets |
 | `apm plugin init [NAME]` | Scaffold a plugin project (`plugin.json` + `apm.yml`). No-flag default scaffolds the legacy Claude-compatible layout (same as `apm init --plugin`). Pass `--format agent-plugin` to explicitly scaffold a portable Agent Plugins v1 project instead; `--claude-plugin` (or `--format plugin\|claude\|claude-plugin`) is the explicit form of the default. `--format` and `--claude-plugin` are mutually exclusive. | `-y` skip prompts, `--target` comma-separated targets, `--format [agent-plugin\|plugin\|claude\|claude-plugin]`, `--claude-plugin`, `-v`/`--verbose` |
+
+### Import existing configuration
+
+```bash
+apm init --discover
+apm init --discover --apply
+apm install --target cursor
+```
+
+Checkpoint first. Inspect the prepared import and per-server setup warnings
+before consenting; export required variables before installation. Unlike
+ordinary `init --yes`, discovery apply merges the manifest. `--yes` bypasses
+only confirmation; actionable non-TTY apply requires it.
+
+Unsupported OpenCode agent tools/permissions, Codex native MCP environment
+references, and unknown hook formats or unsupported shell forms are
+reference-only. Detected URL/argument credentials are refused, not converted
+to placeholders. Only supported MCP env/header fields support placeholder
+conversion; screening is not exhaustive.
+
+Apply preserves originals. Later source-target installation can rewrite rules,
+skip agent collisions, and retain unmarked root files. Activation varies by
+harness. Reconcile verified duplicates selectively, without blanket deletion
+or `--force`; then edit `.apm/` and `apm.yml`. Explicit re-import protects
+modified outputs and retains source reservations; it is not ongoing sync.
+
+JSON/YAML execution emits one stdout document; apply plans/prompts use stderr.
+Inspect `write.status`, per-source `write.items`, and `write.recovery`:
+`complete`/`cancelled` exit 0; `partial`/`refused`/`failed` exit 1.
+Partial apply may commit eligible items; failed recovery is not assumed complete.
+See the [init contract](https://microsoft.github.io/apm/reference/cli/init/#consent-and-results)
+and [support/cutover guide](https://microsoft.github.io/apm/concepts/brownfield-adoption/).
 
 ## Dependency management
 

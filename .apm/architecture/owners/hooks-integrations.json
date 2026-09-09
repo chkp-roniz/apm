@@ -10,23 +10,38 @@
     },
     {
       "id": "neutral-hook-contract",
-      "decision": "Neutral hook source grammar, per-target native shape, and shared-config APM-owned drift projection",
-      "owner": "hook_contract.py (HOOK_COMMAND_KEYS, parse_hook_source, _entries_to_ir), per-target renderers, hook_ownership.py (project_apm_owned_hook_entries)",
+      "decision": "Neutral hook source grammar, native import dispatch/event aliases/portability, per-target native shape, root-local script self-copy prevention, and shared-config APM-owned drift projection",
+      "owner": "hook_contract.py (HOOK_COMMAND_KEYS, parse_hook_source, _entries_to_ir), hook_native_formats.py (read_native_hook_document, canonical_hook_event, event_portability), hook_integrator.py (_HOOK_EVENT_MAP), hook_bundle.py (root_local_hook_reference), hook_ownership.py (project_apm_owned_hook_entries)",
       "selectors": [
         "src/apm_cli/hook_contract.py",
         "src/apm_cli/integration/hook_ir.py",
         "src/apm_cli/integration/hook_native_formats.py",
         "src/apm_cli/integration/hook_integrator.py",
+        "src/apm_cli/integration/hook_bundle.py",
         "src/apm_cli/integration/hook_ownership.py"
       ],
       "guards": ["hooks-integrations-neutral-hook-contract"]
     },
     {
       "id": "plugin-root-hook-command-vocabulary",
-      "decision": "Plugin-root hook command vocabulary + parsing",
+      "decision": "Plugin-root and project-root hook command vocabulary and bounded reference-span parsing",
       "owner": "integration/hook_command_paths.py",
-      "selectors": ["src/apm_cli/integration/hook_command_paths.py"],
+      "selectors": [
+        "src/apm_cli/integration/hook_command_paths.py",
+        "src/apm_cli/adopt/converters/hooks.py",
+        "src/apm_cli/adopt/scanners/hooks.py"
+      ],
       "guards": ["hooks-integrations-hook-command-vocabulary"]
+    },
+    {
+      "id": "native-agent-frontmatter-compatibility",
+      "decision": "Native OpenCode agent frontmatter compatibility and import policy preservation",
+      "owner": "integration/opencode_frontmatter.py (validate_opencode_frontmatter); adopt/converters/agents.py (unsupported preserving-renderer boundary)",
+      "selectors": [
+        "src/apm_cli/integration/opencode_frontmatter.py",
+        "src/apm_cli/adopt/converters/agents.py"
+      ],
+      "guards": ["hooks-integrations-native-agent-compatibility"]
     },
     {
       "id": "mcp-declaration-scope",

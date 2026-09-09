@@ -10,9 +10,12 @@
     },
     {
       "id": "legacy-mcp-ownership-key-migration",
-      "decision": "Legacy MCP target ownership migration and adoption",
+      "decision": "Target-scoped MCP ownership, explicit-empty and exact legacy-baseline adoption with authorized import reads",
       "owner": "install/mcp/ownership.py",
-      "selectors": ["src/apm_cli/install/mcp/ownership.py"],
+      "selectors": [
+        "src/apm_cli/install/mcp/ownership.py",
+        "src/apm_cli/adopt/ownership.py"
+      ],
       "guards": ["install-deployment-mcp-ownership-migration"]
     },
     {

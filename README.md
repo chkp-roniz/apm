@@ -44,15 +44,6 @@ git clone <org/repo> && cd <repo>
 apm install    # every agent is configured
 ```
 
-**Already using Claude Code, Cursor, Copilot, Codex, Gemini, Windsurf, Kiro, OpenCode or Grok Build?** Migrate in two commands:
-
-```bash
-apm init --discover --apply   # import your existing .claude/, .cursor/, .github/ ... into .apm/ + apm.yml
-apm install --target cursor   # replay the same context on any other harness
-```
-
-Read-only preview first (`apm init --discover`), originals untouched, credentials never copied. See [Existing Projects](https://microsoft.github.io/apm/getting-started/migration/).
-
 **Coming from `npx skills add`?** Drop-in:
 
 ```bash
@@ -157,7 +148,12 @@ pip install apm-cli
 Already using the Microsoft Homebrew tap? See the
 [migration guide](https://microsoft.github.io/apm/getting-started/installation/#migrate-from-the-microsoft-tap).
 
-Then start adding packages:
+To onboard with your current agent configuration, preview with `apm init --discover`,
+then add `--apply` to import supported content into a managed APM package.
+See [Existing Projects](https://microsoft.github.io/apm/getting-started/migration/)
+for review and deployment steps.
+
+Then add shared packages:
 
 ```bash
 apm install microsoft/apm-sample-package#v1.0.0

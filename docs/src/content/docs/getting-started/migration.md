@@ -1,11 +1,13 @@
 ---
 title: "Existing Projects"
-description: "Add APM to a project that already has AI agent configuration, or migrate from npx skills add."
+description: "Onboard an existing project with shared packages or import supported agent configuration into APM."
 sidebar:
   order: 5
 ---
 
-APM is additive. It never deletes, overwrites, or modifies your existing configuration files. Your current `.github/copilot-instructions.md`, `AGENTS.md`, `.claude/` config, `.cursor-rules` -- all stay exactly where they are, untouched.
+Start with shared packages, or [import your current configuration](#import-what-you-already-have)
+into a managed APM package. Save a version-control checkpoint or backup before
+onboarding: installation can update native files.
 
 ## Add APM in three steps
 
@@ -17,7 +19,8 @@ Run `apm init` in your project root:
 apm init
 ```
 
-This creates an `apm.yml` manifest alongside your existing files. Nothing is deleted or moved.
+This creates `apm.yml` alongside your existing agent files. If a manifest already
+exists, ordinary init asks before overwriting it; `--yes` skips that safeguard.
 
 ### 2. Install packages
 
@@ -28,7 +31,8 @@ apm install microsoft/copilot-best-practices
 apm install your-org/team-standards
 ```
 
-Each package brings in versioned, maintained configuration instead of stale copies. Your `apm.yml` tracks these as dependencies, and `apm.lock.yaml` pins exact versions.
+`apm.yml` records dependencies; `apm.lock.yaml` pins exact versions.
+Inspect installation warnings and the resulting file changes.
 
 ### 3. Commit and share
 
@@ -37,39 +41,51 @@ git add apm.yml apm.lock.yaml
 git commit -m "Add APM manifest"
 ```
 
-Your teammates run `apm install` and get the same setup. No more copy-pasting configuration between repositories.
+Your teammates run `apm install` to restore the declared packages.
 
 ## Import what you already have
 
-If the project already carries hand-authored agent configuration (`CLAUDE.md`,
-`.claude/`, `.cursor/rules`, `.github/instructions`, hooks, MCP configs), let APM
-inventory it and propose a manifest:
+For existing rules, agents, skills, hooks, or MCP configuration, use discovery
+instead of ordinary init:
 
 ```bash
-apm init --discover            # read-only report: tool, kind, importability, ownership
-apm init --discover --apply    # import into .apm/ and create or merge apm.yml
-apm install --target codex     # replay the same context on another harness
+apm init --discover            # read-only inventory
+apm init --discover --apply    # review the import plan before confirming
 ```
 
-Originals are never modified; credentials in MCP configs become `${VAR}`
-placeholders; files carrying literal secrets are refused. See
-[`apm init`](../../reference/cli/init/#discover-existing-agent-context) and
-[Brownfield Adoption](../../concepts/brownfield-adoption/).
+Apply preserves original bytes and imports eligible content into `.apm/`,
+creating or merging `apm.yml`. Review losses, unsupported entries, and any
+per-server environment setup before consenting. Read-only discovery is not
+a guarantee that every finding can be imported.
 
-## What happens to your existing files?
+After inspecting the package and supplying required environment variables,
+render it for a selected harness:
 
-They continue to work. APM-managed files coexist with manually-created ones. There is no conflict and no takeover.
+```bash
+apm install --target cursor
+```
 
-Over time, you may choose to move manual configuration into APM packages for portability across repositories, but there is no deadline or requirement to do so. APM and manual configuration coexist indefinitely.
+Follow [selective cutover](../../concepts/brownfield-adoption/#cut-over):
+source-target installation can rewrite same-path rules, skip colliding agents,
+and retain unmarked root context files. Reconcile verified duplicates only;
+keep unsupported originals. Activation differs by harness.
 
-## Rollback
+See the [support and screening limits](../../concepts/brownfield-adoption/#supported-conversions)
+and [`apm init` outcomes](../../reference/cli/init/#consent-and-results).
+After verified cutover, edit `.apm/` and `apm.yml`; imports are not continuously
+synchronized.
 
-If you decide APM is not for you:
+## Undo onboarding
 
-1. Delete `apm.yml` and `apm.lock.yaml`.
-2. Your original files are still there, unchanged.
+A failed import attempts to restore files, manifest, and provenance; inspect
+the reported recovery outcome before retrying. This does not undo a later
+installation.
 
-No repo-wide uninstall script is required. If you installed packages and want APM to remove their managed files first, run `apm uninstall <package>` before deleting the manifest and lockfile.
+To undo a completed onboarding, review and restore the relevant changes from
+your checkpoint or backup. Deleting only `apm.yml` and `apm.lock.yaml` does not
+restore rewritten native files or remove deployed content. If uninstalling
+dependencies, run `apm uninstall <package>` while the manifest and lockfile
+still exist; inspect the result before removing project metadata.
 
 ## Coming from `npx skills add`
 
@@ -107,8 +123,8 @@ skill collection layout reference.
 
 ## Next steps
 
-- [Quickstart](/apm/quickstart/) -- first-time setup walkthrough
-- [Dependencies](/apm/consumer/manage-dependencies/) -- managing external packages
+- [Quickstart](../../quickstart/) -- first-time setup walkthrough
+- [Dependencies](../../consumer/manage-dependencies/) -- managing external packages
 - [Manifest schema](../../reference/manifest-schema/) -- full `apm.yml` reference
 - [CLI commands](../../reference/cli/install/) -- complete command reference
 

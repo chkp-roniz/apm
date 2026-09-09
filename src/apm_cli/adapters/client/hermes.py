@@ -111,6 +111,10 @@ class HermesClientAdapter(CopilotClientAdapter):
         return str(self._config_path())
 
     def _load_document(self) -> dict:
+        """Load the scope-resolved document for existing install callers."""
+        return self._read_config(self._config_path())
+
+    def _read_config(self, path: Path) -> dict:
         """Load the full ``config.yaml`` document (preserving siblings).
 
         Returns ``{}`` when the file is absent or empty.  Raises
@@ -118,7 +122,6 @@ class HermesClientAdapter(CopilotClientAdapter):
         mapping (parse error or non-dict root) so write paths can refuse to
         overwrite and silently discard the user's native Hermes credentials.
         """
-        path = self._config_path()
         if not path.is_file():
             return {}
         try:

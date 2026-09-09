@@ -18,13 +18,11 @@ from .base import derive_description, emit_markdown, read_markdown
 
 _NEUTRAL_KEYS = frozenset({"description", "applyTo"})
 ALWAYS_ON = "**"
-"""``applyTo`` value that keeps an always-on source always-on on every target.
-
-Targets render ``applyTo`` as their native scoping (Cursor ``globs``, Claude
-``paths``, Kiro ``fileMatchPattern``); a rule with no ``applyTo`` becomes a
-description-triggered rule on Cursor, which would silently demote imported
-root context. ``**`` matches every file on all of them.
-"""
+"""All-file scope, rendered as native globs/paths, not universal activation."""
+_ACTIVATION_WARNING = (
+    "native trigger is not preserved: description-triggered on Cursor and "
+    "potentially unconditional on other targets; inspect deployment before use"
+)
 
 
 def _apply_to_from(value: Any) -> str:
@@ -53,13 +51,13 @@ def _cursor(meta: dict[str, Any], result: ConvertResult) -> dict[str, Any]:
     elif out.get("description"):
         result.transform(
             "frontmatter.alwaysApply",
-            "Cursor 'agent requested' rule has no APM trigger; imported as always-on",
+            _ACTIVATION_WARNING,
             "warning",
         )
     else:
         result.transform(
             "frontmatter.alwaysApply",
-            "Cursor 'manual' rule has no APM trigger; imported as always-on",
+            _ACTIVATION_WARNING,
             "warning",
         )
     return out
@@ -92,9 +90,7 @@ def _kiro(meta: dict[str, Any], result: ConvertResult) -> dict[str, Any]:
         out["applyTo"] = ALWAYS_ON
         result.transform("frontmatter.inclusion", "always-on steering expressed as applyTo: '**'")
     elif inclusion == "manual":
-        result.transform(
-            "frontmatter.inclusion", "Kiro on-demand steering imported as always-on", "warning"
-        )
+        result.transform("frontmatter.inclusion", _ACTIVATION_WARNING, "warning")
     if meta.get("description"):
         out["description"] = str(meta["description"]).strip()
     return out
@@ -113,7 +109,7 @@ def _trigger_globs(meta: dict[str, Any], result: ConvertResult) -> dict[str, Any
     elif trigger in ("model_decision", "manual"):
         result.transform(
             "frontmatter.trigger",
-            f"'{trigger}' rule has no APM trigger; imported as always-on",
+            _ACTIVATION_WARNING,
             "warning",
         )
     if meta.get("description"):
@@ -141,6 +137,7 @@ _BY_FORMAT = {
     "kiro_steering": _kiro,
     "windsurf_rules": _trigger_globs,
     "antigravity_rules": _trigger_globs,
+    "grok_rules": _generic,
 }
 
 
@@ -150,16 +147,17 @@ class RulesConverter:
     id = "rules->instruction"
 
     def handles(self, converter_id: str) -> bool:
-        return converter_id.endswith("->instruction") and not converter_id.startswith(
-            "root_context"
-        )
+        return converter_id.removesuffix("->instruction") in _BY_FORMAT
 
     def convert(self, finding: Finding, dest: Path, *, ctx: ConvertContext) -> ConvertResult:
         if finding.abs_path is None:
             raise ConvertError("no source path")
         result = ConvertResult()
         meta, body = read_markdown(finding.abs_path, ctx.limits.max_file_bytes, result)
-        mapper = _BY_FORMAT.get(finding.format_id or "", _generic)
+        mapper = _BY_FORMAT.get(finding.format_id or "")
+        if mapper is None:
+            result.skipped_reason = "native rule format has no preserving import contract"
+            return result
         out = mapper(meta, result)
         consumed = {
             "description",

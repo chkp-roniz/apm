@@ -2,6 +2,16 @@
   "version": 1,
   "owners": [
     {
+      "id": "import-provenance-integrity",
+      "decision": "Importer durable source identity, destination reservations, auxiliary output ownership and bounded full local-edit fingerprints (not normalized package or deployment hashes)",
+      "owner": "adopt/provenance.py (ImportSources, source_identity, hash_source, admitted_entries); adopt/materialize.py delegates",
+      "selectors": [
+        "src/apm_cli/adopt/provenance.py",
+        "src/apm_cli/adopt/materialize.py"
+      ],
+      "guards": ["contracts-tooling-import-provenance"]
+    },
+    {
       "id": "dependency-identity-materialization",
       "decision": "Dependency comparison identity and policy casing vs display-cased materialization path; embedded git URL subpath validation",
       "owner": "models/dependency/identity.py + materialization.py + DependencyReference (_check_no_embedded_subpath consumes core/host_providers.py)",

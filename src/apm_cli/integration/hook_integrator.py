@@ -64,7 +64,9 @@ from apm_cli.hook_contract import walk_hook_commands
 from apm_cli.integration.base_integrator import BaseIntegrator, IntegrationResult
 from apm_cli.integration.hook_bundle import (
     copy_deployed_hook_bundle,
+    hook_scripts_base,
     iter_deployable_hook_bundle_files,
+    root_local_hook_reference,
 )
 from apm_cli.integration.hook_command_paths import (
     iter_plugin_root_paths,
@@ -594,7 +596,7 @@ class HookIntegrator(BaseIntegrator):
         if deploy_root is not None:
             return str((deploy_root / target_rel).resolve())
         if target != "claude":
-            return target_rel
+            return target_rel if "/" in target_rel else f"./{target_rel}"
 
         if "$" in target_rel or "`" in target_rel:
             raise ValueError("Claude project hook paths cannot contain shell expansion characters")
@@ -617,30 +619,24 @@ class HookIntegrator(BaseIntegrator):
         root_dir: str | None = None,
         deploy_root: Path | None = None,
         source_key: str | None = None,
+        project_root: Path | None = None,
     ) -> tuple[str, list[tuple[Path, str]]]:
         """Rewrite plugin-root and relative script references for a target."""
         scripts_to_copy = []
         command = normalize_quoted_plugin_root(command)
         new_command = command
 
-        if target == "vscode":
-            base_root = root_dir or ".github"
-            scripts_base = f"{base_root}/hooks/scripts/{package_name}"
-        elif target == "cursor":
-            base_root = root_dir or ".cursor"
-            scripts_base = f"{base_root}/hooks/{package_name}"
-        elif target == "codex":
-            base_root = root_dir or ".codex"
-            scripts_base = f"{base_root}/hooks/{package_name}"
-        elif target == "windsurf":
-            base_root = root_dir or ".windsurf"
-            scripts_base = f"{base_root}/hooks/{package_name}"
-        elif target == "kiro":
-            base_root = root_dir or ".kiro"
-            scripts_base = f"{base_root}/hooks/{package_name}"
-        else:
-            base_root = root_dir or ".claude"
-            scripts_base = f"{base_root}/hooks/{package_name}"
+        scripts_base = hook_scripts_base(target, package_name, root_dir)
+
+        def script_target(source_file: Path, rel_path: str) -> str:
+            target_rel = f"{scripts_base}/{rel_path}"
+            local_ref = root_local_hook_reference(
+                source_file, target_rel, package_path, project_root, hook_file_dir
+            )
+            if local_ref is not None:
+                return local_ref
+            scripts_to_copy.append((source_file, target_rel))
+            return target_rel
 
         handled_plugin_root_refs: set[str] = set()
         traversal_plugin_root_refs: set[str] = set()
@@ -655,8 +651,7 @@ class HookIntegrator(BaseIntegrator):
                 continue
             handled_plugin_root_refs.add(full_var)
             if source_file.exists() and source_file.is_file():
-                target_rel = f"{scripts_base}/{rel_path}"
-                scripts_to_copy.append((source_file, target_rel))
+                target_rel = script_target(source_file, rel_path)
                 resolved_cmd = self._project_scoped_command_path(
                     command,
                     target,
@@ -708,8 +703,7 @@ class HookIntegrator(BaseIntegrator):
             if source_file is None:
                 continue
             if source_file.exists() and source_file.is_file():
-                target_rel = f"{scripts_base}/{rel_path}"
-                scripts_to_copy.append((source_file, target_rel))
+                target_rel = script_target(source_file, rel_path)
                 resolved_cmd = self._project_scoped_command_path(
                     command,
                     target,
@@ -744,6 +738,7 @@ class HookIntegrator(BaseIntegrator):
         hook_file_dir: Path | None = None,
         root_dir: str | None = None,
         deploy_root: Path | None = None,
+        project_root: Path | None = None,
     ) -> tuple[dict, list[tuple[Path, str]]]:
         """Rewrite all command paths in a hooks JSON structure.
 
@@ -760,6 +755,7 @@ class HookIntegrator(BaseIntegrator):
                 all rewritten script paths are resolved to absolute paths so the
                 target can locate scripts regardless of the working directory.
                 When *None*, paths remain relative (backward-compatible behaviour).
+            project_root: Workspace root for recursive self-copy protection.
 
         Returns:
             Tuple of (rewritten_data_copy, list of (source_file, target_rel_path))
@@ -789,6 +785,7 @@ class HookIntegrator(BaseIntegrator):
                             root_dir=root_dir,
                             deploy_root=deploy_root,
                             source_key=key,
+                            project_root=project_root,
                         )
                         if scripts:
                             _log.debug(
@@ -817,6 +814,7 @@ class HookIntegrator(BaseIntegrator):
                                 root_dir=root_dir,
                                 deploy_root=deploy_root,
                                 source_key=key if key != "command" else hook.get("shell"),
+                                project_root=project_root,
                             )
                             if scripts:
                                 _log.debug(
@@ -1074,6 +1072,7 @@ class HookIntegrator(BaseIntegrator):
                 hook_file_dir=hook_file.parent,
                 root_dir=root_dir,
                 deploy_root=deploy_root_for_rewrite,
+                project_root=project_root,
             )
 
             # Generate target filename (clean, no -apm suffix)
@@ -1346,6 +1345,7 @@ class HookIntegrator(BaseIntegrator):
                 hook_file_dir=hook_file.parent,
                 root_dir=root_dir,
                 deploy_root=_deploy_root_for_rewrite,
+                project_root=project_root,
             )
 
             # Merge hooks into config (additive)

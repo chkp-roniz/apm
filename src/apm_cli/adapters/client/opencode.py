@@ -27,7 +27,6 @@ already exists — OpenCode support is opt-in.
 """
 
 import json
-import os
 from pathlib import Path
 
 from ...models.dependency.mcp import _EXTRA_DENYLIST
@@ -44,6 +43,11 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
     supports_user_scope: bool = False
     target_name: str = "opencode"
     mcp_servers_key: str = "mcpServers"
+
+    @property
+    def native_mcp_servers_key(self) -> str:
+        """OpenCode stores native entries under ``mcp``, not its update key."""
+        return "mcp"
 
     # OpenCode's config runtime-substitution support has not yet been
     # individually audited (see #1152). Pin to legacy install-time
@@ -78,17 +82,6 @@ class OpenCodeClientAdapter(CopilotClientAdapter):
 
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(current_config, f, indent=2)
-
-    def get_current_config(self):
-        """Read the current ``opencode.json`` contents."""
-        config_path = self.get_config_path()
-        if not os.path.exists(config_path):
-            return {}
-        try:
-            with open(config_path, encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return {}
 
     def configure_mcp_server(
         self,

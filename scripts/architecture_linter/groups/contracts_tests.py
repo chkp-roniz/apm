@@ -9,9 +9,10 @@ module size budget; they own no RULES of their own.
 """
 
 from scripts.architecture_linter.checks.contracts_dependency_policy import RULES as POLICY_RULES
+from scripts.architecture_linter.checks.contracts_import_provenance import RULES as IMPORT_RULES
 from scripts.architecture_linter.checks.contracts_test_taxonomy import COLLECTORS
 from scripts.architecture_linter.checks.contracts_test_taxonomy import RULES as EXISTING_RULES
 
-RULES = (*EXISTING_RULES, *POLICY_RULES)
+RULES = (*EXISTING_RULES, *POLICY_RULES, *IMPORT_RULES)
 
 __all__ = ["COLLECTORS", "RULES"]

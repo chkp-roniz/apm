@@ -11,6 +11,7 @@ Ports four owner guards recorded in
 
 from __future__ import annotations
 
+import ast
 import re
 
 from scripts.architecture_linter.checks.install_deployment_shared import (
@@ -135,6 +136,7 @@ _MCP_OWNERSHIP_CONSUMERS = (
     "src/apm_cli/install/mcp/integration.py",
     "src/apm_cli/install/mcp/command.py",
     "src/apm_cli/commands/uninstall/engine.py",
+    "src/apm_cli/adopt/ownership.py",
 )
 
 
@@ -195,7 +197,141 @@ def check_mcp_ownership_migration(provider: FactsProvider) -> tuple[Violation, .
                     "MCP ownership consumers must route legacy adoption through install/mcp/ownership.py",
                 )
             )
+    adopt_path = "src/apm_cli/adopt/ownership.py"
+    tree = provider.tree_index(adopt_path)
+    if tree is not None:
+        # Check the actual call, not a mention in a comment or an unused import.
+        delegated = [
+            node
+            for node in tree.nodes
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "mcp_ownership"
+            and node.func.attr == "resolve_mcp_target_servers"
+        ]
+        imported = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "apm_cli.install.mcp"
+            and any(
+                alias.name == "ownership" and alias.asname == "mcp_ownership"
+                for alias in node.names
+            )
+            for node in tree.nodes
+        )
+        authorized = bool(delegated) and all(
+            any(
+                keyword.arg == "approved_root"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "root"
+                for keyword in call.keywords
+            )
+            for call in delegated
+        )
+        if not imported or not authorized:
+            findings.append(
+                _summary(
+                    rule_id,
+                    adopt_path,
+                    "Adopt must call canonical MCP ownership with its approved scope root",
+                )
+            )
+    owner_tree = provider.tree_index(_MCP_OWNERSHIP_OWNER)
+    if owner_tree is not None:
+        guards = [
+            node
+            for node in owner_tree.nodes
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ensure_path_within"
+            and len(node.args) == 2
+            and isinstance(node.args[1], ast.Name)
+            and node.args[1].id == "approved_root"
+        ]
+        if len(guards) < 2:
+            findings.append(
+                _summary(
+                    rule_id,
+                    _MCP_OWNERSHIP_OWNER,
+                    "Import legacy adoption must authorize current and legacy native reads",
+                )
+            )
+    findings.extend(_check_native_mcp_reads(provider, rule_id))
     return tuple(findings)
+
+
+def _check_native_mcp_reads(provider: FactsProvider, rule_id: str) -> list[Violation]:
+    """Guard adapter-owned, quiet reads against write-oriented entrypoints."""
+    findings: list[Violation] = []
+    for path in _python_paths(provider, "src/apm_cli/adapters/client/"):
+        tree = provider.tree_index(path)
+        if tree is None:
+            continue
+        for method in (node for node in tree.nodes if isinstance(node, ast.FunctionDef)):
+            calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+            forbidden = []
+            if method.name == "get_config_path":
+                forbidden = [
+                    call
+                    for call in calls
+                    if (
+                        isinstance(call.func, ast.Attribute)
+                        and call.func.attr in {"mkdir", "makedirs", "exists", "is_file", "open"}
+                    )
+                    or (isinstance(call.func, ast.Name) and call.func.id in {"print", "open"})
+                ]
+            elif method.name == "__init__":
+                forbidden = [
+                    call
+                    for call in calls
+                    if isinstance(call.func, ast.Name)
+                    and call.func.id in {"SimpleRegistryClient", "RegistryIntegration"}
+                ]
+            elif method.name == "get_native_server_configs":
+                guards = [
+                    call
+                    for call in calls
+                    if isinstance(call.func, ast.Name)
+                    and call.func.id == "ensure_path_within"
+                    and len(call.args) == 2
+                    and all(
+                        isinstance(arg, ast.Name) and arg.id == name
+                        for arg, name in zip(
+                            call.args, ("config_path", "approved_root"), strict=True
+                        )
+                    )
+                ]
+                reads = [
+                    call
+                    for call in calls
+                    if isinstance(call.func, ast.Attribute) and call.func.attr == "_read_config"
+                ]
+                if (
+                    not guards
+                    or not reads
+                    or any(read.lineno <= guards[0].lineno for read in reads)
+                    or any(
+                        isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "get_current_config"
+                        for call in calls
+                    )
+                ):
+                    findings.append(
+                        _summary(
+                            rule_id,
+                            path,
+                            "Native MCP reads must authorize the path before quiet adapter parsing",
+                        )
+                    )
+            if forbidden:
+                findings.append(
+                    _summary(
+                        rule_id,
+                        path,
+                        "MCP adapter construction and path lookup must not probe, write, or print",
+                    )
+                )
+    return findings
 
 
 def check_uninstall_reachability(provider: FactsProvider) -> tuple[Violation, ...]:

@@ -9,10 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `apm init --discover [--apply]` inventories existing Claude Code, Copilot, Cursor,
-  Codex, Gemini, Windsurf, Kiro, OpenCode and Grok Build context and imports it
-  into `.apm/` + `apm.yml` for replay on any target; credentials never reach disk.
-  (#1122, #1130, #1227)
+- `apm init --discover [--apply]` imports supported existing configuration into a managed package for onboarding and target-specific rendering, with protected refreshes, bounded credential screening, and explicit unsupported-conversion reports — by @chkp-roniz (#2857)
 
 ### Security
 

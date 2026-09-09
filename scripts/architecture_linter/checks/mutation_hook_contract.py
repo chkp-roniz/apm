@@ -28,6 +28,11 @@ import ast
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+from scripts.architecture_linter.checks.adopt_native_contracts import (
+    adopt_hook_contract,
+    adopt_hook_lexing,
+    native_agent_compatibility,
+)
 from scripts.architecture_linter.checks.mutation_write_shared import (
     _SRC,
     GROUP,
@@ -344,6 +349,7 @@ def _check_neutral_hook_contract(provider: FactsProvider) -> Iterable[Violation]
     """
     rule_id = "mutation_writes.neutral_hook_contract"
     return (
+        *adopt_hook_contract(provider, rule_id),
         *_nhc_validation_before_write(provider, rule_id),
         *_nhc_rewrite_scope(provider, rule_id),
         *_nhc_claude_project_dir(provider, rule_id),
@@ -448,9 +454,11 @@ def _nhc_claude_project_dir(provider: FactsProvider, rule_id: str) -> tuple[Viol
         _duplicate_scan(
             provider,
             rule_id=rule_id,
-            paths=_python_paths(provider, under=_SRC, exclude=(_HOOK_INTEGRATOR,)),
+            paths=_python_paths(
+                provider, under=_SRC, exclude=(_HOOK_INTEGRATOR, _HOOK_COMMAND_PATHS)
+            ),
             pattern=r'"CLAUDE_PROJECT_DIR"',
-            message="Claude project hook paths must be owned by HookIntegrator",
+            message="Claude project hook rendering/lexing must stay at their canonical owners",
             exempt=True,
         )
     )
@@ -711,10 +719,17 @@ def _check_hook_command_vocabulary(provider: FactsProvider) -> Iterable[Violatio
             "HookIntegrator must not hard-code the PLUGIN_ROOT literal",
         )
     )
-    return findings
+    return (*findings, *adopt_hook_lexing(provider, rule_id))
 
 
 RULES: tuple[Rule, ...] = (
+    Rule(
+        id="mutation_writes.native_agent_compatibility",
+        group=GROUP,
+        guard_ids=("hooks-integrations-native-agent-compatibility",),
+        description="Native agent import compatibility and policy restrictions stay owned.",
+        check=native_agent_compatibility,
+    ),
     Rule(
         id="mutation_writes.copilot_cli_mcp_paths",
         group=GROUP,

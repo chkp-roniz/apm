@@ -47,7 +47,7 @@ def discover_options(command: click.Command | Callable[..., Any]) -> Any:
             click.option(
                 "--include-hook-scripts",
                 is_flag=True,
-                help="With --apply: copy in-project hook scripts into .apm/hooks/scripts/",
+                help="With --apply: copy in-project scripts into source-scoped .apm/hooks/ directories",
             ),
         )
     ):

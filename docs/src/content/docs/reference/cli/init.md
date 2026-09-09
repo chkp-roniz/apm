@@ -1,6 +1,6 @@
 ---
 title: apm init
-description: Scaffold a new APM project by creating apm.yml (and optionally plugin.json) with auto-detected metadata.
+description: Create an APM manifest, or discover and import supported existing agent configuration.
 sidebar:
   order: 1
 ---
@@ -13,9 +13,13 @@ apm init [PROJECT_NAME] [OPTIONS]
 
 ## Description
 
-Creates a minimal `apm.yml` in the current directory or in a new
+Ordinary `apm init` creates a minimal `apm.yml` in the current directory or in a new
 `PROJECT_NAME` subdirectory. Auto-detects name, author, and description
 so you can start running `apm install` immediately.
+
+`--discover` instead inventories existing configuration. It is read-only unless
+paired with `--apply`, which imports supported content and creates or merges
+the manifest rather than overwriting it.
 
 The legacy `--plugin` and `--marketplace` flags (which scaffold a
 plugin or marketplace authoring block alongside `apm.yml`) are
@@ -26,24 +30,24 @@ and [`apm marketplace init`](../marketplace/) instead.
 
 | Argument | Description |
 |---|---|
-| `PROJECT_NAME` | Optional. Name of a new directory to create and `cd` into. Pass `.` to initialize in the current directory (same as omitting). Must be non-blank (not empty or whitespace-only), must not contain `/` or `\`, and must not be `..`. |
+| `PROJECT_NAME` | Optional. Name of a new directory to create; enter it afterward with `cd`. Pass `.` to initialize in the current directory (same as omitting). Must be non-blank (not empty or whitespace-only), must not contain `/` or `\`, and must not be `..`. |
 
 ## Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `-y`, `--yes` | off | Skip interactive prompts; use auto-detected defaults. Overwrites an existing `apm.yml` without confirmation. |
+| `-y`, `--yes` | off | Ordinary init: use defaults and overwrite an existing `apm.yml` without confirmation. Discovery apply: skip only confirmation, not warnings or safety checks. |
 | `--plugin` | off | **Deprecated.** Use [`apm plugin init`](../plugin/) instead. Scaffold a plugin authoring project: also writes `plugin.json` and adds a `devDependencies` block to `apm.yml`. Plugin name must be kebab-case, max 64 chars. |
 | `--marketplace` | off | **Deprecated.** Use [`apm marketplace init`](../marketplace/) instead. Append a `marketplace:` authoring block to `apm.yml`. See [Publish to a marketplace](../../../producer/publish-to-a-marketplace/). |
-| `--target` | (prompt) | Comma-separated target list. Skips the interactive target prompt. Stable manifest targets include `copilot`, `claude`, `grok-build`, `cursor`, `opencode`, `codex`, `gemini`, `antigravity`, `windsurf`, `kiro`, and `agent-skills`; `all` expands the default stable set. |
+| `--target` | (prompt) | Comma-separated target list. Ordinary init skips the target prompt; discovery apply uses the order for MCP conflicts and adds these targets alongside detected targets. Stable targets include `copilot`, `claude`, `grok-build`, `cursor`, `opencode`, `codex`, `gemini`, `antigravity`, `windsurf`, `kiro`, and `agent-skills`; `all` expands the default stable set. |
 | `--discover` | off | Inventory existing agent-harness files (Claude Code, Copilot, Cursor, Codex, Gemini, Windsurf, Kiro, OpenCode, Grok Build) and propose an `apm.yml`. Read-only unless `--apply`. See [Discover existing agent context](#discover-existing-agent-context). |
-| `--apply` | off | With `--discover`: apply the plan; convert hand-authored files into `.apm/` and create or merge `apm.yml`. Originals are never modified. `--write` is accepted as an alias. |
+| `--apply` | off | With `--discover`: import eligible hand-authored content into `.apm/` and create or merge `apm.yml`. Apply preserves originals; later installation has separate collision rules. `--write` is an alias. |
 | `--format` | `text` | With `--discover`: `text`, `json`, or `yaml`. Machine formats keep stdout clean. |
 | `-g`, `--global` | off | With `--discover`: scan the user scope (`~/.claude`, `~/.cursor`, `~/.codex`, ...) instead of the project, and write into `~/.apm/`. |
-| `--include-hook-scripts` | off | With `--discover --apply`: copy in-project hook scripts into `.apm/hooks/scripts/` and rewrite hook commands to point at the copies. By default scripts are referenced, never copied or executed. |
+| `--include-hook-scripts` | off | With `--discover --apply`: copy supported scripts into `.apm/hooks/<allocated-hook-stem>/scripts/` and rewrite recognized references. By default scripts remain referenced; import never executes them. |
 | `-v`, `--verbose` | off | Show detailed output. |
 
-Target precedence: `--target` flag > interactive prompt > auto-detect at
+Ordinary-init target precedence: `--target` flag > interactive prompt > auto-detect at
 compile time (used with `--yes` or in non-TTY shells).
 
 `init` writes only manifest-safe stable targets. For example, `--target agents`,
@@ -55,84 +59,73 @@ with `apm install --target grok-cloud`.
 
 ## Discover existing agent context
 
-`apm init --discover` is the inbound path for projects that already carry
-agent configuration by hand. It reads back every location APM knows how to
-deploy to (the same registry `apm install` writes with, inverted) plus the
-root context files each harness loads implicitly, and classifies each hit.
+Run discovery in the project directory; omit `PROJECT_NAME` or pass `.`.
+`--global` selects user scope instead. Registry paths identify candidates,
+not guaranteed inverse conversions.
 
 ```bash
-$ apm init --discover
-[>] Discovering agent context (project scope)
-  TOOL     SCOPE    KIND          PATH                       IMPORT       OWNER       RISK  -> DEST
-  claude   project  rule          .claude/rules/python.md    convertible  host-owned  -     .apm/instructions/python.instructions.md
-  claude   project  hook          .claude/settings.json      convertible  host-owned  exec  .apm/hooks/claude-native.json
-  claude   project  hook-script   .claude/hooks/notify.sh    reference-only host-owned exec -
-  claude   project  mcp-server    .mcp.json#github           convertible  host-owned  exec  apm.yml#dependencies.mcp
-  root     project  root-context  AGENTS.md                  ignored      apm-generated -   -
-[i] Proposed apm.yml changes:
-    targets: claude, copilot, cursor
-    dependencies.mcp: github (from .mcp.json)
-[i] Next steps:
-    Preview only. Re-run with --apply to import into .apm/ and update apm.yml
+apm init --discover                   # read-only inventory
+apm init --discover --apply           # prepare, review, confirm
+apm install --target cursor           # render supported imported content
 ```
 
-Each finding carries:
+The inventory includes tool, scope, kind, path, importability, ownership, risk,
+and proposed destination. `apm-native` and `convertible` are candidates;
+preparation may still refuse an item or classify it reference-only.
+See the [support matrix](../../../concepts/brownfield-adoption/#supported-conversions)
+for agent, hook, and MCP exclusions, credential screening, and activation limits.
 
-| Column | Values |
-|---|---|
-| `KIND` | `instruction`, `rule`, `agent`, `prompt`, `command`, `skill`, `hook`, `hook-script`, `mcp-server`, `root-context`, `style`, `plugin`, `canvas`, `unknown` |
-| `IMPORT` | `apm-native` (copied as is), `convertible` (frontmatter rewritten into APM's neutral form), `reference-only` (listed, never copied), `ignored` (already APM's, or not importable). Files containing credential-shaped tokens are refused with a reason; redact them first. |
-| `OWNER` | `host-owned` (yours), `apm-owned` (recorded in `apm.lock.yaml`), `apm-generated` (compile output carrying an APM marker), `ambiguous` (mixed content; never written) |
-| `RISK` | `exec` (runs code), `net` (talks to the network), `write` (changes files) |
+### Apply preparation
 
-Ownership is decided per file from `apm.lock.yaml`, recorded content hashes,
-APM generation markers, and per-entry `_apm_source` hook markers, so a
-project that already uses APM only sees its hand-authored remainder.
+APM stages eligible host-owned content, validates it with existing primitive
+parsers, and plans a comment-preserving manifest merge. Existing MCP
+declarations are authoritative; competing definitions are reported rather
+than silently replaced. Files, manifest, and provenance participate in commit
+and recovery.
 
-### What `--apply` does
+Versioned provenance protects local edits and reserves source destinations;
+see [refresh rules](../../../concepts/brownfield-adoption/#refresh-and-local-edits).
+This is not an automatic sync or force-refresh operation.
 
-1. Converts every `apm-native` or `convertible`, `host-owned` finding into the
-   project's own `.apm/` layout (`instructions/`, `agents/`, `prompts/`,
-   `skills/`, `hooks/`). The root `.apm/` is an implicit local package, so
-   `apm install` deploys it like any dependency.
-2. Rewrites vendor frontmatter into APM's neutral keys (always-on sources
-   become `applyTo: "**"` so they stay unconditional on every target) and records every
-   preserved, transformed, defaulted, or dropped field (field paths only,
-   never values). Lossy conversions are printed under the file.
-3. Creates `apm.yml` or merges into the existing one with comments preserved:
-   `targets` gains the detected harnesses; MCP servers become self-defined
-   `dependencies.mcp` entries. Literal credentials in MCP `env`, `headers`,
-   arguments, or URLs are replaced by `${SERVER_KEY}` placeholders that
-   `apm install` resolves from the environment.
-4. Stages into a temporary directory and validates with the same parsers
-   `apm install` uses *before* asking for confirmation, so the plan you approve
-   lists every file with its conversion losses, the MCP servers and `apm.yml`
-   edits, and anything skipped or refused. Files, `apm.yml` and provenance are
-   then committed together and rolled back together on any error. If some items
-   could not be imported the command still applies the rest but reports `PARTIAL`
-   and exits with status 1 (`"status": "partial"` in JSON/YAML).
-5. Writes `.apm/.import-sources.json` so a re-run is idempotent: unchanged
-   sources are skipped, updated sources refresh their import, and an import
-   you edited by hand is left alone with a warning.
+Before installing, follow [selective cutover](../../../concepts/brownfield-adoption/#cut-over):
+apply preserves originals, but source-target installation can rewrite same-path
+rules, skip colliding agents, and retain unmarked root context files.
 
-`--apply` never deletes or edits the originals. After verifying the `.apm/`
-copies, remove the originals yourself; until then both are loaded by the
-source harness. `apm compile` only overwrites project-root `CLAUDE.md`,
-`AGENTS.md`, and `GEMINI.md` when they carry an APM generated marker; unmarked
-hand-authored root files are retained with a warning.
+### Consent and results
 
-### Migrating between harnesses
+Preparation shows file changes, per-server warnings and environment setup,
+manifest edits, losses, skips, and refusals before one confirmation.
+`--yes` suppresses only that prompt. Actionable non-TTY apply requires `--yes`;
+empty or unchanged plans do not prompt.
 
-```bash
-apm init --discover --apply --yes      # import into .apm/ + apm.yml
-apm install --target cursor            # render the imported context on Cursor
-```
+| Outcome | `write.status` | Exit |
+|---|---|---|
+| Empty, unchanged, or reference-only-only plan | `complete` | `0` |
+| Successful apply | `complete` | `0` |
+| Item refusal, conversion error, scan error, or protected conflict; eligible remainder may commit | `partial` | `1` |
+| Actionable non-TTY apply without `--yes` | `refused` | `1` |
+| Declined or blank confirmation | `cancelled` | `0` |
+| Preparation, staged validation, or commit failure | `failed` | `1` |
 
-Rules without `applyTo` may stay description-triggered on Cursor but become
-unconditional elsewhere; the migration plan calls out these activation changes.
-Hooks are stored in APM's neutral grammar as `.apm/hooks/<tool>-native.json`
-and re-rendered per target. Events one harness cannot express are kept and
-reported as pass-through so nothing is silently lost.
+Preview returns the inventory without `write`; a completed scan exits `0`
+even when `errors` lists unevaluated paths. It does not certify importability.
+
+For JSON/YAML discovery execution results, stdout contains one document;
+the apply plan and prompt use stderr. Apply adds:
+
+- `write.items`: per-source `id`, `source`, `tool`, `destination`, `decision`,
+  `error`, and `changes`, including separate attribution for MCP servers sharing
+  `apm.yml#dependencies.mcp`.
+- `write.written`, `write.failed`, `write.skipped`, `write.manifest`, and
+  `write.changes`: output paths, failures, decisions, manifest notes, and
+  field-change records.
+- `write.recovery`: `not-needed`, `restored`, or `incomplete`. Commit failure
+  attempts restoration; incomplete recovery retains staging material for
+  inspection. Do not assume a failed operation restored everything.
+
+`refused` and `cancelled` commit nothing. EOF cancels the prompt in every
+format. Ordinary Click argument/usage errors
+retain their normal output contract.
 
 ### Hidden alias
 
@@ -143,49 +136,30 @@ reported as pass-through so nothing is silently lost.
 Initialize in the current directory with prompts:
 
 ```bash
-$ apm init
-Setting up your APM project...
-Project name: my-app
-Version (1.0.0):
-Description: My APM project
-Author: alice
-About to create:
-  name: my-app
-  targets: copilot, claude
-Is this OK? [Y/n]: y
-[+] APM project initialized successfully!
-Created Files
-  * apm.yml  Project configuration
+apm init
 ```
 
 Non-interactive scaffold of a new directory:
 
 ```bash
-$ apm init my-app --yes
-[*] Created project directory: my-app
-[+] APM project initialized successfully!
-Created Files
-  * apm.yml  Project configuration
+apm init my-app --yes
+cd my-app
 ```
 
 Plugin authoring project (creates `plugin.json` plus `apm.yml` with
 `devDependencies`, version defaults to `0.1.0`):
 
 ```bash
-$ apm init my-skill --plugin --yes
-[+] APM project initialized successfully!
-Created Files
-  * apm.yml      Project configuration
-  * plugin.json  Plugin metadata
+apm init my-skill --plugin --yes
 ```
 
 Pin targets up front, skip the prompt:
 
 ```bash
-$ apm init --yes --target copilot,claude,cursor
+apm init --yes --target copilot,claude,cursor
 ```
 
-## Behavior
+## Ordinary-init behavior
 
 - **Files created:** `apm.yml` always. `plugin.json` when `--plugin` is
   set. The `marketplace:` block is appended to `apm.yml` when

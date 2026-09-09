@@ -1,135 +1,133 @@
 ---
 title: "Brownfield Adoption"
-description: "How apm init --discover reads existing harness configuration back into APM: scanner registry, classification, ownership, redaction, converters, and loss accounting."
+description: "Import supported agent configuration into a managed APM package, review conversion limits, and reconcile deployed files."
 sidebar:
   order: 7
 ---
 
-APM's install path is table-driven: `KNOWN_TARGETS` says where every primitive
-lands for every harness, hooks travel through a vendor-neutral contract, and
-MCP servers have one client adapter each. Brownfield adoption is the same
-machinery run backwards. `apm init --discover` scans the locations the
-registry would write to, decides which files are yours, and (on `--apply`)
-converts them into the project's own `.apm/` package and `apm.yml`.
+Use `apm init --discover` to inventory existing agent configuration, then
+`--apply` to import supported content into `.apm/` and `apm.yml`. The result is
+an [implicit local package](../package-anatomy/) deployed by `apm install`,
+not a synchronized mirror of native configuration.
 
-This page is the design reference for that flow (issues #1122 and #1130).
+## Discovery and ownership
 
-## Scanner registry
+Discovery uses the target registry for file locations, native readers for hooks
+and MCP, and additional root-context and plugin scanners. Knowing a deployment
+path does **not** establish a preserving inverse conversion. Preview classifies
+findings; apply preparation determines whether their contents can be imported.
 
-Discovery is a list of scanners, each yielding raw findings for one family of
-artifacts. Built-in scanners:
+Only **host-owned** findings are eligible. Lockfile claims, deployed hashes,
+generation markers, hook ownership sidecars, and client/scope-specific MCP
+ownership distinguish them from **apm-owned**, **apm-generated**, or **ambiguous**
+content. Ambiguous files are not imported, including mixed managed root files.
 
-| Scanner | Source of truth | What it reports |
+The inventory labels candidates **apm-native** or **convertible**.
+**Reference-only** entries are listed without replacement; **ignored** entries
+include unknown files, private overrides, and already-managed content.
+Unsafe inputs are refused, not downgraded to reference-only.
+
+Reads and writes must remain within the selected project or user scope.
+Unverifiable paths and exceeded admission budgets produce errors. Discovery's
+finding cap is not a bound on all filesystem traversal.
+
+## Supported conversions
+
+| Source | Imported form | Limits |
 |---|---|---|
-| `profile-files` | `KNOWN_TARGETS` inverted: `deploy_root or root_dir / subdir / *extension` | instructions, rules, agents, prompts, commands, skills, per-file hooks, canvases; plus `unknown` files inside those directories |
-| `root-context` | fixed table | `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `STYLE.md`, harness `generated_files`, user-scope equivalents |
-| `hooks` | `_MERGE_HOOK_TARGETS` | merged hook configs (`.claude/settings.json`, `.cursor/hooks.json`, ...) and the scripts their commands run |
-| `mcp` | MCP client adapters (`get_config_path`, `mcp_servers_key`) | one finding per server per client |
-| `plugins` | `find_plugin_root_sources` | plugin-shaped layouts, reference-only |
+| Copilot instructions, prompts, agents | Corresponding `.apm/` primitives | Existing APM-shaped content; validation and credential screening still apply |
+| Cursor, Claude, Kiro, Windsurf, Antigravity rules | `.apm/instructions/*.instructions.md` | Native globs/paths become `applyTo`; unsupported trigger distinctions produce warnings |
+| Hand-authored root context (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`) | Instructions, scoped for nested context | Generated or ambiguous files excluded; Claude `@path` imports become links or are dropped with reasons |
+| Markdown agents; Codex TOML agents | `.apm/agents/*.agent.md` | Portable keys retained, vendor keys reported as dropped; OpenCode agents with native `tools` or `permission` policies, or incompatible frontmatter, are reference-only |
+| Markdown commands, Windsurf workflows, Gemini TOML commands | `.apm/prompts/*.prompt.md` | Portable keys retained; vendor fields and argument transformations reported |
+| Skill directories | `.apm/skills/<name>/` | Name normalized; symlinks refused; non-content files filtered |
+| Merged Claude, Codex, Cursor, Gemini, Windsurf, Antigravity hooks; Copilot/Kiro per-file hooks | `.apm/hooks/<allocated-hook-stem>.json` | Command hooks only; canonical events and timeout units; unknown formats, non-command hooks, and unsupported shell forms are reference-only |
+| MCP client entries | Self-defined `dependencies.mcp` entries | OpenCode native `mcp` entries and command arrays supported; unsupported environment references, including Codex `bearer_token_env_var`, `env_http_headers`, and `env_vars`, are reference-only |
+| Styles, plugin layouts, canvases | None | Reference-only |
 
-Every rule is a scoped glob under one harness directory; the scan never walks
-the whole tree. Symlinks that resolve outside the scan root, binary files, and
-oversize files are reported as errors, not followed. Third parties extend
-discovery by registering a scanner, a classification row, and a converter.
+Converters report `preserved`, `transformed`, `defaulted`, `dropped`, and
+`redacted` fields with reasons. A hook event passed through unmapped is not a
+promise that another harness executes it. Review each target's output.
 
-## Kinds and importability
+### Activation differs by harness
 
-Kinds are harness-neutral: `instruction`, `rule`, `agent`, `prompt`,
-`command`, `skill`, `hook`, `hook-script`, `mcp-server`, `root-context`,
-`style`, `plugin`, `canvas`, `unknown`. The classification table maps
-`(tool, kind)` to one of:
+Unconditional source rules generally import as `applyTo: "**"`, but target
+renderers express that as file matching: Cursor `globs`, Claude `paths`,
+Kiro `fileMatchPattern`, or Windsurf `trigger: glob`. Cursor does not regain
+`alwaysApply: true` through this conversion.
 
-- **apm-native**: already APM's format (Copilot instructions, prompts, agents, `SKILL.md` directories, Copilot per-file hooks). Copied verbatim.
-- **convertible**: vendor frontmatter or document shape is rewritten into APM's neutral form (rules, agents, commands, merged hooks, MCP servers, root context files).
-- **reference-only**: listed for the migration plan but never copied: hook scripts, style guides, plugin layouts, canvases.
-- **ignored**: unknown files, private local overrides (`CLAUDE.local.md`), and anything APM already owns.
+Without `applyTo`, Cursor uses description-triggered rules, while Claude,
+Kiro, and Windsurf render unconditional rules. Manual/model-triggered source
+rules can lose those distinctions. Import-and-render does not guarantee
+identical activation or behavior across harnesses.
 
-## Ownership
+### Hook scripts
 
-A file is written only when it is **host-owned**. The decision uses, in order:
+Import does not execute hooks or MCP servers. Supported hook commands retain
+references to source scripts by default. `--include-hook-scripts` copies admitted
+UTF-8 scripts under `.apm/hooks/<allocated-hook-stem>/scripts/`, preserving
+ordinary permission bits. APM screens the checked bytes before copying and
+rewrites only recognized path spans, preserving surrounding shell syntax.
+Command substitutions, here-documents, and unsupported dynamic or machine-local
+script paths make the hook reference-only.
 
-1. `apm.lock.yaml` deployed-file claims (`DeploymentLedgerCodec`) and local bundle files.
-2. Recorded content hashes for format-transformed rule files (`.cursor/rules/*.mdc`, `.claude/rules/*.md`, `.kiro/steering/*.md`, ...), which the deploy side owns 1:1 without a managed-files row. A rule whose stem matches a source instruction is **ambiguous**.
-3. APM generation markers in compiled context (`<!-- Generated by APM CLI -->`, the distributed-compiler marker, the managed Copilot header). A file with an `<!-- apm:start -->` managed section is ambiguous; only text outside the block would be imported.
-4. Per-entry `_apm_source` hook markers, re-injected from the `apm-hooks.json` sidecar. Hook ownership is per entry: the finding carries the host-authored slice and notes how many APM entries were skipped.
-5. Lockfile MCP ownership (`mcp_configs`).
+### Credential screening
 
-## Redaction
+Detected literal credentials in MCP URLs or arguments are **refused**, not
+replaced with placeholders. Supported stdio `env` and HTTP `headers` values
+can become `${SERVER_KEY}` references; Codex HTTP credential placeholders are
+not supported. Export the reported variables before installation.
 
-The report shows paths, names, counts and field paths. It never shows file
-content. Home directories collapse to `~`, URLs lose userinfo and query
-strings, MCP `env` and `headers` values are shown only when they are
-`${VAR}` placeholders, and hook commands are reduced to the executable's
-basename. Diagnostics from converters name fields, never values.
+Screening includes literal portions beside placeholders and outgoing retained
+MCP extras. Content converters also refuse recognized credential patterns.
+This is bounded screening, not exhaustive secret detection; review imported
+files and reports before sharing.
 
-## Converters and loss accounting
+The separate [security model](../../enterprise/security/) has two layers:
+**built-in protection** automatically blocks critical findings during `install`,
+`compile`, and `unpack`, with zero configuration; **`apm audit`** provides explicit
+reporting (SARIF/JSON/markdown), remediation (`--strip`), and standalone scanning
+(`--file`).
 
-Each converter turns one finding into APM source files and returns a list of
-field changes: `preserved`, `transformed`, `defaulted`, `dropped`, or
-`redacted`, each with a field path and reason. Dropped fields are warnings.
+## Refresh and local edits
 
-| Source | Destination | Notes |
-|---|---|---|
-| Cursor `.mdc` (`globs`, `alwaysApply`, `description`) | `.apm/instructions/*.instructions.md` (`applyTo`, `description`) | `alwaysApply: true` becomes `applyTo: "**"`; agent-requested and manual rules import without `applyTo` and a warning |
-| Claude `.claude/rules` (`paths`) | instruction | `paths` becomes `applyTo` |
-| Kiro steering (`inclusion`, `fileMatchPattern`) | instruction | `manual` imports as always-on with a warning |
-| Windsurf / Antigravity rules (`trigger`, `globs`) | instruction | `model_decision` and `manual` import as always-on with a warning |
-| `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules` | `.apm/instructions/<tool>-root.instructions.md` with `applyTo: "**"` | generated files skipped; managed section removed; Claude `@path` imports become links or are dropped when they escape the project |
-| Agents (Claude, Cursor, Grok, Kiro, OpenCode markdown; Codex TOML) | `.apm/agents/*.agent.md` | keeps `name`, `description`, `tools`, `model`, `handoffs`; drops vendor keys |
-| Commands (Claude, Cursor, Grok, OpenCode markdown; Windsurf workflows; Gemini TOML) | `.apm/prompts/*.prompt.md` | keeps the portable command key set; `{{args}}` becomes `$ARGUMENTS` |
-| Skill directories | `.apm/skills/<name>/` | name normalised to agentskills.io rules; symlinks refused |
-| Merged hooks (Claude, Codex, Cursor, Gemini, Windsurf, Antigravity), Kiro per-file, Copilot per-file | `.apm/hooks/<tool>-native.json` | neutral wrapped grammar, canonical event names, seconds for timeouts; vendor-only events pass through with a warning |
-| MCP client entries | `dependencies.mcp` self-defined entries | placeholders normalised to `${VAR}`; literal credentials replaced by `${SERVER_KEY}`; Codex bearer and header env vars become header placeholders; OpenCode command arrays split |
+`.apm/.import-sources.json` version 2 reserves destinations by full source
+identity: tool, scope, primitive kind, and normalized source path. Primary and
+auxiliary outputs retain ownership even when sources disappear or colliding
+sources are added or reordered. Removing a source does not delete its import.
 
-Hook output files are named `<tool>-native.json` on purpose: names ending in
-`-hooks` are routed to a single target by the hook integrator, which would
-pin an imported hook to the harness it came from.
+Refresh requires verified, unchanged destination content. Complete, bounded
+fingerprints cover paths, entry types, bytes, additions, removals, hidden files,
+empty directories, and POSIX executable bits. Windows normalizes executable
+bits to zero; timestamps and other permission bits are excluded. Admission
+limits are 1 MiB per file, 10 MiB per tree, 2,000 entries, and depth 64.
+These fingerprints are separate from package/lockfile hashes.
 
-### Always-on sources
-
-A rule that is unconditional at its source (a root context file, Cursor
-`alwaysApply: true`, Kiro `inclusion: always`, Windsurf `trigger: always_on`,
-a Claude rule without `paths`) is imported with `applyTo: "**"`. Without an
-`applyTo`, APM renders a Cursor rule with only a description, which Cursor
-treats as agent-requested rather than always-on; `**` keeps it unconditional
-on every target.
-
-## Hook scripts
-
-Importing a hook means APM can *reference* the script, never that it runs it.
-By default commands keep pointing at the original in-project path
-(`"$CLAUDE_PROJECT_DIR"/x` becomes `./x`), and the install-time bundler copies
-the script when it deploys the hook. `--apply --include-hook-scripts` copies
-in-project, non-symlinked scripts into `.apm/hooks/scripts/` with their mode
-preserved and rewrites the command. Absolute or `~` paths are left as they are
-and flagged as machine-local.
-
-## Write path
-
-`--apply` (alias `--write`) stages into a temporary directory inside the project, validates every
-staged file with the parsers `apm install` uses, moves files into `.apm/` only
-if all pass, then updates `apm.yml` with ruamel round-trip loading so comments
-survive. Any file whose content carries credential-shaped tokens (GitHub, GitLab,
-AWS, Slack, OpenAI keys, private keys, bearer tokens, URL userinfo) in common
-text-bearing skill files is refused with a reason rather than copied. This is a
-bounded safeguard, not a guarantee that every secret shape is detected.
-`.apm/.import-sources.json` records source and output hashes for idempotent
-re-runs. At user scope (`--global`) the same layout lands under
-`~/.apm/`, which `apm install --global` treats as its implicit local package.
+Local edits or missing outputs block replacement. Legacy ownership is reused
+only when unambiguous; empty or unverifiable output hashes cannot authorize
+refresh. Conflicts remain untouched and make apply partial/nonzero. File-source,
+destination, and metadata checks run again before commit. Unchanged imports
+avoid rewriting output; existing MCP declarations remain authoritative.
 
 ## Cut-over
 
-Originals stay in place. Until you remove them, the source harness loads both
-the original and the deployed copy. `apm compile` only overwrites project-root
-`CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` when they carry an APM generated
-marker; unmarked hand-authored root files are retained with a warning. After
-verifying the `.apm/` copies, remove the originals or keep `AGENTS.md`
-hand-authored with `<!-- apm:start -->` / `<!-- apm:end -->` markers and
-`compilation.agents_md.mode: managed_section`.
+1. Save a version-control checkpoint or backup. Preview with `apm init --discover`.
+2. Run `apm init --discover --apply`. Review the staged plan, conversion losses,
+   per-server setup requirements, and exclusions before consenting. See the
+   [consent and result contract](../../reference/cli/init/#consent-and-results).
+3. Inspect `.apm/` and `apm.yml`, supply required environment variables, then
+   render a selected target, for example `apm install --target cursor`.
+4. Compare deployed files and verify activation. **Apply preserves original
+   bytes; installation is a separate operation.** Installing back to the source
+   harness can rewrite a same-path rule or skip a colliding hand-authored agent.
+   Compilation retains unmarked project-root `CLAUDE.md`, `AGENTS.md`, and
+   `GEMINI.md` with a warning.
+5. Reconcile only verified duplicates. Keep unsupported content and any original
+   still serving the harness; do not blanket-delete native directories or use
+   `--force` as a cutover shortcut. Retained originals may overlap with deployed
+   context. For a hand-authored `AGENTS.md`, see
+   [managed-section compilation](../../reference/cli/compile/).
 
-Imported rules without `applyTo` can render as description-triggered on Cursor
-but unconditional on other harnesses. A manual rule imported with `applyTo: "**"`
-stays always-on everywhere; the plan lists these activation changes before you
-consent. `apm install --target <harness>` renders the imported package for that
-harness; portability is import-and-render, not byte-identical behaviour on
-every target.
+After verified cutover, edit adopted content in `.apm/` and `apm.yml` and
+redeploy. Re-import is explicit, not ongoing synchronization. For user-scope
+onboarding, `--global` imports into `~/.apm/`; deploy with `apm install --global`.

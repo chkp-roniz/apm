@@ -12,17 +12,20 @@ to the size of the workspace.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
 from apm_cli.constants import DEFAULT_SKIP_DIRS
 from apm_cli.integration.targets import TargetProfile
-from apm_cli.utils.path_security import PathTraversalError, ensure_path_within
+from apm_cli.utils.path_security import PathTraversalError
 
 from .model import HarnessKind, RawFinding, Risk, ScanError, Scope
 from .redact import Redactor
+from .safety import approved_path
 
 _PROBE_BYTES = 4096
 
@@ -34,6 +37,8 @@ class ScanLimits:
     max_file_bytes: int = 1_048_576
     max_files_per_rule: int = 500
     max_skill_dirs: int = 200
+    max_entries_per_rule: int = 5000
+    max_depth: int = 32
 
 
 @dataclass
@@ -47,11 +52,44 @@ class ScanContext:
     limits: ScanLimits = field(default_factory=ScanLimits)
     errors: list[ScanError] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Anchor discovery to the selected scope, including a selected-root alias."""
+        self.root = self.root.resolve()
+
     def display(self, path: Path) -> str:
         return self.redactor.path(path, self.scope)
 
     def error(self, path: Path, reason: str) -> None:
         self.errors.append(ScanError(display_path=self.display(path), reason=reason))
+
+    def approve(self, path: Path, *, mutable: bool = False) -> Path | None:
+        """Admit a path before filesystem inspection, recording explicit refusal."""
+        try:
+            return approved_path(path, self.root, mutable=mutable)
+        except PathTraversalError as exc:
+            self.error(path, str(exc))
+            return None
+
+    def file_size(self, path: Path, *, mutable: bool = False) -> int | None:
+        """Admit a regular, bounded file before any probe/read; absent files are quiet."""
+        target = self.approve(path, mutable=mutable)
+        if target is None:
+            return None
+        try:
+            info = target.stat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            self.error(path, "unreadable")
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            if not stat.S_ISDIR(info.st_mode):
+                self.error(path, "source is not a regular file")
+            return None
+        if info.st_size > self.limits.max_file_bytes:
+            self.error(path, "oversize; not parsed")
+            return None
+        return info.st_size
 
 
 @dataclass(frozen=True)
@@ -65,7 +103,8 @@ class ScanRule:
 
     The leading wildcard-free segments form the directory that is opened; the
     remaining segments (which may contain ``*``, ``?`` or ``[...]`` in any
-    position, e.g. ``*/SKILL.md``) are handed to ``Path.glob``. ``**`` is
+    position, e.g. ``*/SKILL.md``) are matched one admitted directory at a
+    time. ``**`` is
     rejected so a rule can never walk the whole workspace; ``recursive=True``
     widens the match to the subtree below the rule directory instead.
     """
@@ -171,39 +210,100 @@ def _skipped(rel: PurePosixPath) -> bool:
 
 
 def _resolve_within(ctx: ScanContext, path: Path) -> Path | None:
-    """Resolve *path*, rejecting symlinks that escape the scan root."""
-    if not path.is_symlink():
-        return path
-    resolved = path.resolve(strict=False)
+    """Admit every path, not just paths whose final component is a symlink."""
+    return ctx.approve(path)
+
+
+def directory_entries(
+    ctx: ScanContext, directory: Path, *, budget: list[int] | None = None
+) -> list[Path]:
+    """Enumerate one admitted directory, bounding entries before sorting.
+
+    A rule shares the single-element remaining-entry budget across all its
+    directories; other scanners get a fresh bounded listing. Entry type is not
+    inspected here: consumers must admit each returned path before doing so.
+    """
+    remaining = budget if budget is not None else [ctx.limits.max_entries_per_rule]
+    if remaining[0] < 0 or ctx.approve(directory) is None:
+        return []
+    entries: list[Path] = []
     try:
-        ensure_path_within(resolved, ctx.root)
-    except PathTraversalError:
-        ctx.error(path, "symlink escapes scan root")
-        return None
-    return resolved
+        if not directory.is_dir():
+            return []
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                remaining[0] -= 1
+                if remaining[0] < 0:
+                    ctx.error(directory, "directory entry limit exceeded; truncated")
+                    break
+                entries.append(directory / entry.name)
+    except OSError:
+        ctx.error(directory, "unreadable directory")
+    return sorted(entries)
 
 
 def iter_rule_matches(ctx: ScanContext, rule: ScanRule) -> Iterator[Path]:
     """Yield files matching *rule* under ``ctx.root`` within the configured limits."""
     directory = ctx.root / rule.directory
-    if not directory.is_dir():
-        return
-    matches = directory.rglob(rule.pattern) if rule.recursive else directory.glob(rule.pattern)
+    parts = PurePosixPath(rule.pattern).parts
+    # Explicit wildcard ancestors may retain contained aliases. Recursive
+    # descent does not follow directory links, matching Path.rglob's policy.
+    pending = [(directory, parts, rule.recursive, 0)]
+    budget = [ctx.limits.max_entries_per_rule]
+    matches: list[Path] = []
+    limit = (
+        min(ctx.limits.max_files_per_rule, ctx.limits.max_skill_dirs)
+        if rule.is_dir_rule
+        else ctx.limits.max_files_per_rule
+    )
     count = 0
-    for candidate in sorted(matches):
+    while pending and budget[0] >= 0:
+        current, pattern, recursive, depth = pending.pop()
+        if ctx.approve(current) is None:
+            continue
+        if depth > ctx.limits.max_depth:
+            ctx.error(current, "directory depth limit exceeded; truncated")
+            continue
         try:
+            if not current.is_dir():
+                continue
+        except OSError:
+            ctx.error(current, "unreadable directory")
+            continue
+        wildcard = any(char in pattern[0] for char in "*?[")
+        candidates = (
+            directory_entries(ctx, current, budget=budget)
+            if wildcard or recursive
+            else [current / pattern[0]]
+        )
+        for candidate in candidates:
             rel = PurePosixPath(candidate.relative_to(ctx.root).as_posix())
-        except ValueError:
-            rel = PurePosixPath(candidate.as_posix())
-        if _skipped(rel):
-            continue
-        if not candidate.is_file():
-            continue
-        count += 1
-        if count > ctx.limits.max_files_per_rule:
-            ctx.error(directory, f"more than {ctx.limits.max_files_per_rule} matches; truncated")
-            return
-        yield candidate
+            if _skipped(rel) or candidate.name in DEFAULT_SKIP_DIRS:
+                continue
+            if ctx.approve(candidate) is None:
+                continue
+            try:
+                is_dir = candidate.is_dir()
+                if recursive and is_dir and not candidate.is_symlink():
+                    pending.append((candidate, pattern, True, depth + 1))
+                if not fnmatch(candidate.name, pattern[0]):
+                    continue
+                if len(pattern) > 1:
+                    if is_dir:
+                        pending.append((candidate, pattern[1:], False, depth + 1))
+                    continue
+                if not candidate.is_file():
+                    continue
+            except OSError:
+                ctx.error(candidate, "unreadable")
+                continue
+            count += 1
+            if count > limit:
+                ctx.error(directory, f"more than {limit} matches; truncated")
+                yield from sorted(matches)
+                return
+            matches.append(candidate)
+    yield from sorted(matches)
 
 
 def findings_for_rule(ctx: ScanContext, rule: ScanRule) -> Iterator[RawFinding]:
@@ -213,17 +313,13 @@ def findings_for_rule(ctx: ScanContext, rule: ScanRule) -> Iterator[RawFinding]:
         if target is None:
             continue
         subject = candidate.parent if rule.is_dir_rule else candidate
-        try:
-            size = os.path.getsize(target)
-        except OSError:
-            ctx.error(candidate, "unreadable")
+        size = ctx.file_size(candidate)
+        if size is None:
             continue
         notes = list(rule.notes)
         if probe_text(target) is None:
             ctx.error(candidate, "binary or unreadable")
             continue
-        if size > ctx.limits.max_file_bytes:
-            notes.append("oversize; not parsed")
         yield RawFinding(
             tool=rule.tool,
             scope=ctx.scope,

@@ -58,8 +58,7 @@ class VSCodeClientAdapter(MCPClientAdapter):
                 project-local paths when supported.
         """
         super().__init__(project_root=project_root, user_scope=user_scope)
-        self.registry_client = SimpleRegistryClient(registry_url)
-        self.registry_integration = RegistryIntegration(registry_url)
+        self._configure_registry(SimpleRegistryClient, RegistryIntegration, registry_url)
 
     def get_config_path(self, logger=None):
         """Get the path to the VSCode MCP configuration file in the repository.
@@ -67,24 +66,7 @@ class VSCodeClientAdapter(MCPClientAdapter):
         Returns:
             str: Path to the .vscode/mcp.json file.
         """
-        # Use the resolved project root, which may be explicitly provided
-        repo_root = self.project_root
-
-        # Path to .vscode/mcp.json in the repository
-        vscode_dir = repo_root / ".vscode"
-        mcp_config_path = vscode_dir / "mcp.json"
-
-        # Create the .vscode directory if it doesn't exist
-        try:
-            if not vscode_dir.exists():
-                vscode_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            if logger:
-                logger.warning(f"Could not create .vscode directory: {e}")
-            else:
-                print(f"Warning: Could not create .vscode directory: {e}")
-
-        return str(mcp_config_path)
+        return str(self.project_root / ".vscode" / "mcp.json")
 
     def update_config(self, new_config, logger=None):
         """Update the VSCode MCP configuration with new values.
@@ -98,6 +80,7 @@ class VSCodeClientAdapter(MCPClientAdapter):
         config_path = self.get_config_path(logger=logger)
 
         try:
+            Path(config_path).parent.mkdir(parents=True, exist_ok=True)
             # Write the updated config
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(new_config, f, indent=2)
@@ -120,8 +103,7 @@ class VSCodeClientAdapter(MCPClientAdapter):
 
         try:
             try:
-                with open(config_path, encoding="utf-8") as f:
-                    return json.load(f)
+                return self._read_config(Path(config_path))
             except (FileNotFoundError, json.JSONDecodeError):
                 return {}
         except Exception as e:

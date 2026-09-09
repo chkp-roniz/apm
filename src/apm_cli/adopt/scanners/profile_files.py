@@ -19,7 +19,7 @@ from apm_cli.integration.targets import (
 )
 
 from ..model import HarnessKind, RawFinding, Risk, Scope
-from ..registry import ScanContext, ScanRule, findings_for_rule
+from ..registry import ScanContext, ScanRule, directory_entries, findings_for_rule
 
 _PRIMITIVE_KINDS: dict[str, HarnessKind] = {
     "instructions": HarnessKind.INSTRUCTION,
@@ -185,17 +185,21 @@ def unrecognised_files(
         if rule.is_dir_rule or rule.kind is HarnessKind.ROOT_CONTEXT:
             continue
         directory = ctx.root / rule.directory
-        if rule.directory in seen_dirs or not directory.is_dir():
+        if rule.directory in seen_dirs:
             continue
         seen_dirs.add(rule.directory)
         count = 0
-        for candidate in sorted(directory.iterdir()):
-            if not candidate.is_file() or candidate.is_symlink():
-                continue
+        for candidate in directory_entries(ctx, directory):
             if candidate.as_posix() in matched or candidate.name.startswith("."):
+                continue
+            size = ctx.file_size(candidate, mutable=True)
+            if size is None:
                 continue
             count += 1
             if count > ctx.limits.max_files_per_rule:
+                ctx.error(
+                    directory, f"more than {ctx.limits.max_files_per_rule} matches; truncated"
+                )
                 break
             yield RawFinding(
                 tool=rule.tool,
@@ -203,7 +207,7 @@ def unrecognised_files(
                 kind=HarnessKind.UNKNOWN,
                 display_path=ctx.display(candidate),
                 abs_path=candidate,
-                size_bytes=candidate.stat().st_size,
+                size_bytes=size,
                 notes=(
                     f"unrecognised file in a {rule.tool} {rule.primitive or ''} directory".replace(
                         "  ", " "

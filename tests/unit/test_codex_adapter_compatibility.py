@@ -53,21 +53,31 @@ class TestInit:
         assert adapter.mcp_servers_key == "mcp_servers"
         assert adapter.supports_user_scope is True
 
-    def test_registry_client_created(self, tmp_path: Path) -> None:
+    def test_registry_client_created_lazily_once(self, tmp_path: Path) -> None:
         with (
             patch("apm_cli.adapters.client.codex.SimpleRegistryClient") as mock_rc,
-            patch("apm_cli.adapters.client.codex.RegistryIntegration"),
-        ):
-            CodexClientAdapter(project_root=tmp_path)
-        mock_rc.assert_called_once()
-
-    def test_registry_integration_created(self, tmp_path: Path) -> None:
-        with (
-            patch("apm_cli.adapters.client.codex.SimpleRegistryClient"),
             patch("apm_cli.adapters.client.codex.RegistryIntegration") as mock_ri,
         ):
-            CodexClientAdapter(project_root=tmp_path)
-        mock_ri.assert_called_once()
+            adapter = CodexClientAdapter(project_root=tmp_path)
+            mock_rc.assert_not_called()
+            mock_ri.assert_not_called()
+            assert adapter.registry_client is mock_rc.return_value
+            assert adapter.registry_client is mock_rc.return_value
+            mock_rc.assert_called_once_with(None)
+            mock_ri.assert_not_called()
+
+    def test_registry_integration_created_lazily_once(self, tmp_path: Path) -> None:
+        with (
+            patch("apm_cli.adapters.client.codex.SimpleRegistryClient") as mock_rc,
+            patch("apm_cli.adapters.client.codex.RegistryIntegration") as mock_ri,
+        ):
+            adapter = CodexClientAdapter(project_root=tmp_path)
+            mock_ri.assert_not_called()
+            mock_rc.assert_not_called()
+            assert adapter.registry_integration is mock_ri.return_value
+            assert adapter.registry_integration is mock_ri.return_value
+            mock_ri.assert_called_once_with(None)
+            mock_rc.assert_not_called()
 
     def test_user_scope_stored(self, tmp_path: Path) -> None:
         adapter = _make_adapter(project_root=tmp_path, user_scope=True)

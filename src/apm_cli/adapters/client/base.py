@@ -1,14 +1,18 @@
 """Base adapter interface for MCP clients."""
 
+import json
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Any, ClassVar
 
 from ...models.dependency.mcp import _EXTRA_DENYLIST, TrustedEnvLiteral
 from ...utils.console import _rich_error, _rich_warning
+from ...utils.path_security import ensure_path_within
 
 _INPUT_VAR_RE = re.compile(r"\$\{input:([^}]+)\}")
 
@@ -254,6 +258,23 @@ def _has_env_placeholder(value):
     return bool(_ENV_PLACEHOLDER_RE.search(value))
 
 
+def server_configs_from_document(document: Any, key: str) -> dict[str, Mapping[str, Any]]:
+    """Extract native server entries, including nested and dotted TOML tables."""
+    if not key or not isinstance(document, Mapping):
+        return {}
+    nested = document.get(key)
+    servers = {
+        str(name): config
+        for name, config in (nested.items() if isinstance(nested, Mapping) else ())
+        if isinstance(config, Mapping)
+    }
+    prefix = f"{key}."
+    for raw_key, config in document.items():
+        if isinstance(raw_key, str) and raw_key.startswith(prefix) and isinstance(config, Mapping):
+            servers.setdefault(raw_key[len(prefix) :].strip('"'), config)
+    return servers
+
+
 def _stringify_env_literal(value):
     """Return MCP env literal values in the manifest ``map<string, string>`` shape."""
     if isinstance(value, bool):
@@ -346,6 +367,19 @@ class MCPClientAdapter(ABC):
         """Return the target runtime's env-var placeholder syntax for *name*."""
         return "${" + name + "}"
 
+    def _configure_registry(self, client_factory, integration_factory, registry_url) -> None:
+        """Defer registry/cache initialization until a registry operation needs it."""
+        self._registry_client_factory = partial(client_factory, registry_url)
+        self._registry_integration_factory = partial(integration_factory, registry_url)
+
+    @cached_property
+    def registry_client(self):
+        return self._registry_client_factory()
+
+    @cached_property
+    def registry_integration(self):
+        return self._registry_integration_factory()
+
     def _translate_env_placeholder_for_runtime(self, value):
         """Translate env-var placeholders to this adapter's runtime syntax."""
         if not isinstance(value, str):
@@ -379,7 +413,7 @@ class MCPClientAdapter(ABC):
 
     @abstractmethod
     def get_config_path(self):
-        """Get the path to the MCP configuration file."""
+        """Locate the MCP configuration without creating directories or output."""
         pass
 
     @abstractmethod
@@ -395,6 +429,37 @@ class MCPClientAdapter(ABC):
     def get_current_config(self):
         """Get the current MCP configuration."""
         pass
+
+    @property
+    def native_mcp_servers_key(self) -> str:
+        """Native read key; distinct from compatibility/update wrapper metadata."""
+        return self.mcp_servers_key
+
+    def _read_config(self, path: Path) -> Any:
+        """Parse one explicit native path, without output or filesystem writes.
+
+        Non-JSON adapters override this parser. Callers own authorization and
+        error policy; discovery must not use write-oriented diagnostic readers.
+        """
+        with open(path, encoding="utf-8") as config_file:
+            return json.load(config_file)
+
+    def get_native_server_configs(
+        self, *, approved_root: Path | None = None
+    ) -> dict[str, Mapping[str, Any]]:
+        """Read native entries quietly, authorizing before any content probe.
+
+        Import callers supply their selected project or user root. Adapters with
+        additional read paths must authorize each path before opening it.
+        """
+        config_path = Path(self.get_config_path())
+        if approved_root is not None:
+            ensure_path_within(config_path, approved_root)
+        try:
+            document = self._read_config(config_path)
+        except FileNotFoundError:
+            return {}
+        return server_configs_from_document(document, self.native_mcp_servers_key)
 
     @abstractmethod
     def configure_mcp_server(
